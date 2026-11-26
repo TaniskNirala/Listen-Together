@@ -1,0 +1,6 @@
+{
+  "name": "PulseRoom",
+  "description": "Synchronized listen-together music rooms powered by YouTube, Spotify track matching, Socket.IO, and PostgreSQL.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

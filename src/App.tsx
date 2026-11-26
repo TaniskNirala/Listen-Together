@@ -1,0 +1,532 @@
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { Loader2, Lock } from 'lucide-react';
+import { apiFetch, ApiError } from './lib/api';
+import { disconnectSocket, getSocket } from './lib/socket';
+import { useTheme } from './hooks/useTheme';
+import { useClockSync } from './hooks/useClockSync';
+import { TopBar, type AppView } from './components/TopBar';
+import { AuthView } from './components/AuthView';
+import { LobbyView } from './components/LobbyView';
+import { AdminPanel } from './components/AdminPanel';
+import { RoomView } from './components/RoomView';
+import { ReconnectingOverlay } from './components/ReconnectingOverlay';
+import { ToastContainer, type ToastItem } from './components/ToastContainer';
+import type {
+  AuthUser,
+  ChatMessage,
+  ControlMode,
+  HistoryItem,
+  PlaylistImportProgress,
+  ReactionEvent,
+  RepeatMode,
+  RoomFullState,
+  RoomListener,
+  RoomPlaybackState,
+  RoomRole,
+} from './shared/types';
+
+function readRoomCodeFromUrl(): string | null {
+  const match = /^\/room\/([a-zA-Z0-9_-]{3,16})\/?$/.exec(window.location.pathname);
+  return match ? match[1].toUpperCase() : null;
+}
+
+export default function App() {
+  const { theme, toggleTheme } = useTheme();
+
+  const [booting, setBooting] = useState(true);
+  const [needsAdminSetup, setNeedsAdminSetup] = useState(false);
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [activeView, setActiveView] = useState<AppView>('lobby');
+
+  // Room & Socket state
+  const [socketConnected, setSocketConnected] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+  const [nextRetrySec, setNextRetrySec] = useState(0);
+
+  const [activeRoom, setActiveRoom] = useState<RoomFullState | null>(null);
+  const [pendingRoomCode, setPendingRoomCode] = useState<string | null>(() => readRoomCodeFromUrl());
+  const [passwordPromptCode, setPasswordPromptCode] = useState<string | null>(null);
+  const [roomPasswordDraft, setRoomPasswordDraft] = useState('');
+  const [reactions, setReactions] = useState<ReactionEvent[]>([]);
+  const [importProgress, setImportProgress] = useState<PlaylistImportProgress | null>(null);
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+
+  const activeRoomCodeRef = useRef<string | null>(null);
+  const activeRoomPasswordRef = useRef<string | undefined>(undefined);
+  activeRoomCodeRef.current = activeRoom?.code ?? null;
+
+  const notify = useCallback(
+    (message: string, tone: ToastItem['tone'] = 'info') => {
+      const id = crypto.randomUUID();
+      setToasts((prev) => [...prev.slice(-3), { id, message, tone }]);
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id));
+      }, 4500);
+    },
+    []
+  );
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const socket = user ? getSocket() : null;
+  const { getEstimatedServerNowMs, refreshClock } = useClockSync(socket, socketConnected);
+
+  // Initial session & setup-status bootstrap
+  useEffect(() => {
+    let cancelled = false;
+    async function init() {
+      try {
+        const status = await apiFetch<{ needsAdminSetup: boolean }>('/api/auth/setup-status');
+        if (cancelled) return;
+        setNeedsAdminSetup(status.needsAdminSetup);
+        if (!status.needsAdminSetup) {
+          try {
+            const me = await apiFetch<{ user: AuthUser }>('/api/auth/me');
+            if (!cancelled) setUser(me.user);
+          } catch {
+            // Not signed in
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          notify(
+            err instanceof ApiError ? err.message : 'Unable to reach server.',
+            'warning'
+          );
+        }
+      } finally {
+        if (!cancelled) setBooting(false);
+      }
+    }
+    void init();
+    return () => {
+      cancelled = true;
+    };
+  }, [notify]);
+
+  const joinRoomViaSocket = useCallback(
+    (code: string, password?: string) => {
+      const s = getSocket();
+      const normalized = code.trim().toUpperCase();
+      activeRoomPasswordRef.current = password;
+
+      if (!s.connected) {
+        setPendingRoomCode(normalized);
+        s.connect();
+        return;
+      }
+
+      s.emit(
+        'room:join',
+        { code: normalized, password },
+        (resp?: { ok: boolean; state?: RoomFullState; code?: string; error?: string }) => {
+          if (!resp) {
+            notify('Timed out joining room. Retrying...', 'warning');
+            return;
+          }
+          if (!resp.ok) {
+            if (resp.code === 'PASSWORD_REQUIRED') {
+              setPasswordPromptCode(normalized);
+              setRoomPasswordDraft('');
+              return;
+            }
+            notify(resp.error || 'Could not join room.', 'error');
+            setPendingRoomCode(null);
+            return;
+          }
+          if (resp.state) {
+            setPasswordPromptCode(null);
+            setPendingRoomCode(null);
+            setActiveRoom(resp.state);
+            setActiveView('room');
+            if (window.location.pathname !== `/room/${resp.state.code}`) {
+              window.history.replaceState(null, '', `/room/${resp.state.code}`);
+            }
+            refreshClock();
+          }
+        }
+      );
+    },
+    [notify, refreshClock]
+  );
+
+  // Manage Socket.IO lifecycle, auto-reconnect, retry countdown, and room resync
+  useEffect(() => {
+    if (!user) {
+      disconnectSocket();
+      setSocketConnected(false);
+      setReconnecting(false);
+      return;
+    }
+
+    const s = getSocket();
+    let countdownTimer: number | null = null;
+
+    const startCountdown = (attemptNum: number) => {
+      const waitSec = Math.min(15, Math.max(1, Math.round(Math.pow(1.6, Math.min(attemptNum, 6)))));
+      setNextRetrySec(waitSec);
+      if (countdownTimer) window.clearInterval(countdownTimer);
+      countdownTimer = window.setInterval(() => {
+        setNextRetrySec((prev) => (prev > 0 ? prev - 1 : 0));
+      }, 1000);
+    };
+
+    const onConnect = () => {
+      setSocketConnected(true);
+      setReconnecting(false);
+      setReconnectAttempt(0);
+      setNextRetrySec(0);
+      if (countdownTimer) window.clearInterval(countdownTimer);
+
+      // Automatically rejoin room & resync full state after reconnect / server cold-start
+      const codeToJoin = activeRoomCodeRef.current || pendingRoomCode;
+      if (codeToJoin) {
+        joinRoomViaSocket(codeToJoin, activeRoomPasswordRef.current);
+      }
+    };
+
+    const onDisconnect = (reason: string) => {
+      setSocketConnected(false);
+      if (reason !== 'io client disconnect') {
+        setReconnecting(true);
+        setReconnectAttempt((n) => n + 1);
+        startCountdown(1);
+      }
+    };
+
+    const onConnectError = (err: Error) => {
+      setSocketConnected(false);
+      if (err.message === 'UNAUTHORIZED') {
+        setUser(null);
+        setActiveRoom(null);
+        setReconnecting(false);
+        return;
+      }
+      setReconnecting(true);
+      setReconnectAttempt((prev) => {
+        const next = prev + 1;
+        startCountdown(next);
+        return next;
+      });
+    };
+
+    const onPlaybackUpdate = (payload: {
+      playback: RoomPlaybackState;
+      history: HistoryItem[];
+    }) => {
+      setActiveRoom((prev) =>
+        prev
+          ? {
+              ...prev,
+              playback: payload.playback,
+              history: payload.history,
+            }
+          : prev
+      );
+    };
+
+    const onListenersUpdate = (payload: {
+      listeners: RoomListener[];
+      controlMode: ControlMode;
+    }) => {
+      setActiveRoom((prev) =>
+        prev
+          ? {
+              ...prev,
+              listeners: payload.listeners,
+              controlMode: payload.controlMode,
+            }
+          : prev
+      );
+    };
+
+    const onMyRole = (payload: { role: RoomRole }) => {
+      setActiveRoom((prev) => (prev ? { ...prev, myRole: payload.role } : prev));
+    };
+
+    const onChatMessage = (msg: ChatMessage) => {
+      setActiveRoom((prev) => {
+        if (!prev) return prev;
+        if (prev.chat.some((c) => c.id === msg.id)) return prev;
+        return {
+          ...prev,
+          chat: [...prev.chat, msg].slice(-100),
+        };
+      });
+    };
+
+    const onReactionBurst = (event: ReactionEvent) => {
+      setReactions((prev) => [...prev.slice(-10), event]);
+      window.setTimeout(() => {
+        setReactions((prev) => prev.filter((r) => r.id !== event.id));
+      }, 2300);
+    };
+
+    const onRoomToast = (payload: { message: string; tone?: ToastItem['tone'] }) => {
+      notify(payload.message, payload.tone || 'info');
+    };
+
+    const onRoomKicked = (payload: { reason?: string }) => {
+      setActiveRoom(null);
+      setActiveView('lobby');
+      window.history.replaceState(null, '', '/');
+      notify(payload.reason || 'You were removed from the room.', 'warning');
+    };
+
+    const onAuthRevoked = (payload: { reason?: string }) => {
+      setUser(null);
+      setActiveRoom(null);
+      setActiveView('lobby');
+      notify(payload.reason || 'Session ended.', 'warning');
+    };
+
+    const onImportProgress = (progress: PlaylistImportProgress) => {
+      setImportProgress(progress);
+      if (progress.stage === 'done' || progress.stage === 'error') {
+        window.setTimeout(() => setImportProgress(null), 1500);
+      }
+    };
+
+    s.on('connect', onConnect);
+    s.on('disconnect', onDisconnect);
+    s.on('connect_error', onConnectError);
+    s.on('room:playback', onPlaybackUpdate);
+    s.on('room:listeners', onListenersUpdate);
+    s.on('room:my_role', onMyRole);
+    s.on('chat:message', onChatMessage);
+    s.on('reaction:burst', onReactionBurst);
+    s.on('room:toast', onRoomToast);
+    s.on('room:kicked', onRoomKicked);
+    s.on('auth:revoked', onAuthRevoked);
+    s.on('playlist:import_progress', onImportProgress);
+
+    if (!s.connected) {
+      s.connect();
+    } else {
+      onConnect();
+    }
+
+    return () => {
+      if (countdownTimer) window.clearInterval(countdownTimer);
+      s.off('connect', onConnect);
+      s.off('disconnect', onDisconnect);
+      s.off('connect_error', onConnectError);
+      s.off('room:playback', onPlaybackUpdate);
+      s.off('room:listeners', onListenersUpdate);
+      s.off('room:my_role', onMyRole);
+      s.off('chat:message', onChatMessage);
+      s.off('reaction:burst', onReactionBurst);
+      s.off('room:toast', onRoomToast);
+      s.off('room:kicked', onRoomKicked);
+      s.off('auth:revoked', onAuthRevoked);
+      s.off('playlist:import_progress', onImportProgress);
+    };
+  }, [user, pendingRoomCode, joinRoomViaSocket, notify]);
+
+  const emitWithAck = useCallback(
+    (event: string, payload: Record<string, unknown> = {}) => {
+      const s = getSocket();
+      if (!s.connected) {
+        notify('Reconnecting to server...', 'warning');
+        return;
+      }
+      s.emit(event, payload, (resp?: { ok: boolean; error?: string }) => {
+        if (resp && !resp.ok && resp.error) {
+          notify(resp.error, 'error');
+        }
+      });
+    },
+    [notify]
+  );
+
+  const handleLeaveRoom = () => {
+    const s = getSocket();
+    if (s.connected) s.emit('room:leave');
+    setActiveRoom(null);
+    activeRoomPasswordRef.current = undefined;
+    setActiveView('lobby');
+    window.history.replaceState(null, '', '/');
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // proceed with local signout regardless
+    }
+    disconnectSocket();
+    setUser(null);
+    setActiveRoom(null);
+    setActiveView('lobby');
+    window.history.replaceState(null, '', '/');
+  };
+
+  const handlePasswordPromptSubmit = (e: FormEvent) => {
+    e.preventDefault();
+    if (!passwordPromptCode) return;
+    joinRoomViaSocket(passwordPromptCode, roomPasswordDraft);
+  };
+
+  if (booting) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-[#F8FAFC] dark:bg-[#0B0E14]">
+        <div className="flex items-center gap-3 text-sm text-slate-600 dark:text-slate-400">
+          <Loader2 className="h-5 w-5 animate-spin text-orange-500" aria-hidden="true" />
+          <span>Loading PulseRoom...</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A] dark:bg-[#0B0E14] dark:text-[#F1F5F9]">
+      <TopBar
+        user={user}
+        activeView={activeView}
+        activeRoomCode={activeRoom?.code ?? null}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+        onNavigate={(view) => {
+          if (view === 'room' && !activeRoom) {
+            setActiveView('lobby');
+            return;
+          }
+          setActiveView(view);
+        }}
+        onSignOut={() => void handleSignOut()}
+      />
+
+      {!user ? (
+        <AuthView
+          needsAdminSetup={needsAdminSetup}
+          onAuthenticated={(authedUser) => {
+            setNeedsAdminSetup(false);
+            setUser(authedUser);
+            notify(`Signed in as ${authedUser.username}.`, 'success');
+          }}
+        />
+      ) : activeView === 'admin' && user.role === 'admin' ? (
+        <AdminPanel
+          currentUser={user}
+          onJumpToRoom={(code) => joinRoomViaSocket(code)}
+          onNotify={notify}
+        />
+      ) : activeView === 'room' && activeRoom ? (
+        <RoomView
+          user={user}
+          room={activeRoom}
+          reactions={reactions}
+          importProgress={importProgress}
+          getEstimatedServerNowMs={getEstimatedServerNowMs}
+          onLeaveRoom={handleLeaveRoom}
+          onPlay={() => emitWithAck('playback:play', { clientEventId: crypto.randomUUID() })}
+          onPause={() => emitWithAck('playback:pause', { clientEventId: crypto.randomUUID() })}
+          onSeek={(positionSec) =>
+            emitWithAck('playback:seek', { positionSec, clientEventId: crypto.randomUUID() })
+          }
+          onSkip={() => emitWithAck('playback:skip', { clientEventId: crypto.randomUUID() })}
+          onTrackEnded={(trackId) => getSocket().emit('playback:track_ended', { trackId })}
+          onEmbedError={(trackId) => getSocket().emit('playback:embed_error', { trackId })}
+          onDurationDiscovered={(trackId, durationSec) =>
+            getSocket().emit('playback:report_duration', { trackId, durationSec })
+          }
+          onPlayQueueItemNow={(trackId) =>
+            emitWithAck('queue:play_now', { trackId, clientEventId: crypto.randomUUID() })
+          }
+          onRemoveQueueItem={(trackId) => emitWithAck('queue:remove', { trackId })}
+          onReorderQueue={(fromIndex, toIndex) =>
+            emitWithAck('queue:reorder', { fromIndex, toIndex })
+          }
+          onCycleRepeat={(repeatMode) => emitWithAck('queue:repeat', { repeatMode })}
+          onToggleShuffle={(shuffleEnabled) => emitWithAck('queue:shuffle', { shuffleEnabled })}
+          onChangeControlMode={(controlMode) => emitWithAck('room:control_mode', { controlMode })}
+          onChangeMemberRole={(targetUserId, role) =>
+            emitWithAck('member:role', { targetUserId, role })
+          }
+          onKickMember={(targetUserId) => emitWithAck('member:kick', { targetUserId })}
+          onSendChat={(body) =>
+            emitWithAck('chat:send', { body, clientMessageId: crypto.randomUUID() })
+          }
+          onSendReaction={(emoji) => getSocket().emit('reaction:send', { emoji })}
+          onNotify={notify}
+        />
+      ) : (
+        <LobbyView
+          user={user}
+          onEnterRoom={(code, password) => joinRoomViaSocket(code, password)}
+          onNotify={notify}
+        />
+      )}
+
+      {/* Room Password Dialog */}
+      {passwordPromptCode && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="room-password-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-sm rounded-2xl border border-slate-200 bg-white p-6 shadow-xl dark:border-[#242C3D] dark:bg-[#131822]">
+            <div className="mb-3 flex items-center gap-2.5">
+              <Lock className="h-5 w-5 text-orange-500" aria-hidden="true" />
+              <h2
+                id="room-password-title"
+                className="font-display text-lg font-semibold text-slate-900 dark:text-slate-100"
+              >
+                Password required ({passwordPromptCode})
+              </h2>
+            </div>
+            <form onSubmit={handlePasswordPromptSubmit} className="space-y-4">
+              <div>
+                <label htmlFor="prompt-room-pw" className="sr-only">
+                  Room password
+                </label>
+                <input
+                  id="prompt-room-pw"
+                  type="password"
+                  required
+                  autoFocus
+                  value={roomPasswordDraft}
+                  onChange={(e) => setRoomPasswordDraft(e.target.value)}
+                  placeholder="Enter room password"
+                  className="h-11 w-full rounded-xl border border-slate-300 bg-white px-3.5 text-sm text-slate-900 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20 dark:border-[#2A3347] dark:bg-[#0B0E14] dark:text-slate-100"
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setPasswordPromptCode(null)}
+                  className="h-10 rounded-xl border border-slate-200 px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-[#242C3D] dark:text-slate-300 dark:hover:bg-[#1A202E]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="h-10 rounded-xl bg-orange-600 px-4 text-sm font-semibold text-white hover:bg-orange-500"
+                >
+                  Unlock room
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Server Waking Up / Reconnecting Overlay */}
+      <ReconnectingOverlay
+        visible={Boolean(user) && reconnecting}
+        attempt={reconnectAttempt}
+        nextRetryInSec={nextRetrySec}
+        onRetryNow={() => {
+          const s = getSocket();
+          if (!s.connected) s.connect();
+        }}
+      />
+
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+    </div>
+  );
+}

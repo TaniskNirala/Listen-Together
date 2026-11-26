@@ -75,10 +75,11 @@ const kickSchema = z.object({
 const chatSchema = z.object({
   body: z.string().trim().min(1).max(500),
   clientMessageId: z.string().max(80).optional(),
+  replyToId: z.string().trim().min(1).max(80).optional(),
 });
 
 const reactionSchema = z.object({
-  emoji: z.string().min(1).max(8),
+  emoji: z.string().min(1).max(16),
 });
 
 const durationReportSchema = z.object({
@@ -745,7 +746,8 @@ export function attachSocketServer(
           ctx.room,
           socket.data.user,
           parsed.data.body,
-          parsed.data.clientMessageId
+          parsed.data.clientMessageId,
+          parsed.data.replyToId
         );
         if (msg) {
           io.to(getRoomChannel(ctx.room.code)).emit('chat:message', msg);
@@ -765,7 +767,7 @@ export function attachSocketServer(
         }
 
         const now = Date.now();
-        if (now - socket.data.lastReactionAt < 250) {
+        if (now - socket.data.lastReactionAt < 180) {
           ack?.({ ok: true, throttled: true });
           return;
         }

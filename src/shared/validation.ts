@@ -33,10 +33,57 @@ export function validateUsername(raw: string): UsernameValidationResult {
   };
 }
 
-export const REACTION_EMOJIS = ['🔥', '❤️', '👏', '🎵', '🙌', '😮'] as const;
+export const QUICK_REACTION_EMOJIS = ['🔥', '❤️', '👏', '🎵', '🙌', '😮'] as const;
+
+export const REACTION_GROUPS = [
+  {
+    id: 'hype',
+    label: 'Hype',
+    emojis: ['🔥', '🎉', '🚀', '⚡', '💯', '🙌'],
+  },
+  {
+    id: 'vibe',
+    label: 'Vibe',
+    emojis: ['🎵', '🎧', '💃', '✨', '🌙', '👏'],
+  },
+  {
+    id: 'feels',
+    label: 'Feels',
+    emojis: ['❤️', '😍', '😂', '🥹', '😭', '😮'],
+  },
+] as const;
+
+export const REACTION_EMOJIS = [
+  '🔥',
+  '🎉',
+  '🚀',
+  '⚡',
+  '💯',
+  '🙌',
+  '🎵',
+  '🎧',
+  '💃',
+  '✨',
+  '🌙',
+  '👏',
+  '❤️',
+  '😍',
+  '😂',
+  '🥹',
+  '😭',
+  '😮',
+] as const;
+
 export type ReactionEmoji = (typeof REACTION_EMOJIS)[number];
 
 const ALLOWED_REACTION_SET = new Set<string>(REACTION_EMOJIS);
+
+const REACTION_ALIAS_MAP: Record<string, ReactionEmoji> = {
+  '❤': '❤️',
+  '❤️': '❤️',
+  '⚡️': '⚡',
+  '✨️': '✨',
+};
 
 /**
  * Normalizes variation selectors (e.g., plain ❤ -> ❤️) and validates against the allowed emoji set.
@@ -44,6 +91,15 @@ const ALLOWED_REACTION_SET = new Set<string>(REACTION_EMOJIS);
 export function normalizeReactionEmoji(raw: string): ReactionEmoji | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  const canonical = trimmed === '❤' ? '❤️' : trimmed;
+  const canonical = REACTION_ALIAS_MAP[trimmed] || trimmed;
   return ALLOWED_REACTION_SET.has(canonical) ? (canonical as ReactionEmoji) : null;
+}
+
+/**
+ * Collapses whitespace and truncates a replied-to chat message for compact quote previews.
+ */
+export function buildReplySnippet(body: string, maxLength = 120): string {
+  const normalized = body.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
 }

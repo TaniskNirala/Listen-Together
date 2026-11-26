@@ -18,7 +18,6 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { computeExpectedPositionSec, formatDuration } from '../shared/sync';
-import { REACTION_EMOJIS } from '../shared/validation';
 import type {
   AuthUser,
   ControlMode,
@@ -31,7 +30,30 @@ import { AddMusicModal } from './AddMusicModal';
 import { ChatPanel } from './ChatPanel';
 import { ListenersPanel } from './ListenersPanel';
 import { QueuePanel } from './QueuePanel';
+import { ReactionPicker } from './ReactionPicker';
 import { YouTubeSyncPlayer } from './YouTubeSyncPlayer';
+
+const DESKTOP_REACTION_LANES = [
+  'right-4 reaction-sway-left',
+  'right-16 reaction-sway-right',
+  'right-28 reaction-sway-mid',
+  'right-40 reaction-sway-left',
+  'right-52 reaction-sway-right',
+] as const;
+
+const MOBILE_REACTION_LANES = [
+  'right-3 reaction-sway-left',
+  'right-14 reaction-sway-right',
+  'right-24 reaction-sway-mid',
+] as const;
+
+function reactionLaneIndex(id: string, totalLanes: number): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+  }
+  return hash % totalLanes;
+}
 
 interface RoomViewProps {
   user: AuthUser;
@@ -55,7 +77,7 @@ interface RoomViewProps {
   onChangeControlMode: (mode: ControlMode) => void;
   onChangeMemberRole: (targetUserId: number, role: 'dj' | 'listener') => void;
   onKickMember: (targetUserId: number) => void;
-  onSendChat: (body: string) => void;
+  onSendChat: (body: string, replyToId?: string) => void;
   onSendReaction: (emoji: string) => void;
   onNotify: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
 }
@@ -279,23 +301,32 @@ export function RoomView({
                 onDurationDiscovered={onDurationDiscovered}
               />
 
-              {/* Floating Reaction Bursts (Desktop: full 16:9 stage height so upward float never clips) */}
+              {/* Floating Reaction Bursts (Desktop: staggered lanes across full 16:9 stage) */}
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-0 z-20 hidden items-end justify-end gap-2 overflow-hidden p-4 lg:flex"
+                className="pointer-events-none absolute inset-0 z-20 hidden overflow-hidden lg:block"
               >
-                {reactions.map((r) => (
-                  <div
-                    key={r.id}
-                    data-testid="reaction-burst"
-                    className="animate-reaction-float flex flex-col items-center rounded-xl border border-white/15 bg-slate-950/85 px-2.5 py-1.5 text-center shadow-lg backdrop-blur-sm"
-                  >
-                    <span className="text-2xl leading-none">{r.emoji}</span>
-                    <span className="mt-1 max-w-[96px] truncate text-[10px] font-medium text-slate-100">
-                      {r.username}
-                    </span>
-                  </div>
-                ))}
+                {reactions.map((r) => {
+                  const laneClass =
+                    DESKTOP_REACTION_LANES[reactionLaneIndex(r.id, DESKTOP_REACTION_LANES.length)];
+                  return (
+                    <div
+                      key={r.id}
+                      data-testid="reaction-burst"
+                      className={`animate-reaction-float absolute bottom-4 flex flex-col items-center rounded-2xl border border-white/15 bg-slate-950/85 px-3 py-2 text-center shadow-xl backdrop-blur-md ${laneClass}`}
+                    >
+                      {r.comboCount && r.comboCount >= 2 && (
+                        <span className="absolute -right-2 -top-2 rounded-full bg-orange-600 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white shadow-sm tabular-nums">
+                          ×{r.comboCount}
+                        </span>
+                      )}
+                      <span className="text-3xl leading-none drop-shadow-sm">{r.emoji}</span>
+                      <span className="mt-1 max-w-[96px] truncate text-[10px] font-medium text-slate-100">
+                        {r.username}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
@@ -481,23 +512,13 @@ export function RoomView({
               </div>
             </div>
 
-            {/* Quick Reactions + Keyboard shortcuts hint */}
+            {/* Quick Reactions + Expanded Picker + Keyboard shortcuts hint */}
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3 dark:border-[#1E2636]/70">
-              <div className="flex items-center gap-1" role="group" aria-label="Quick reactions">
-                <span className="mr-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+              <div className="flex items-center gap-1.5">
+                <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
                   React
                 </span>
-                {REACTION_EMOJIS.map((emoji) => (
-                  <button
-                    key={emoji}
-                    type="button"
-                    onClick={() => onSendReaction(emoji)}
-                    aria-label={`React with ${emoji}`}
-                    className="flex h-8 w-8 items-center justify-center rounded-lg text-base transition-transform hover:bg-slate-100 active:scale-125 dark:hover:bg-[#1A202E]"
-                  >
-                    {emoji}
-                  </button>
-                ))}
+                <ReactionPicker onSendReaction={onSendReaction} align="left" />
               </div>
 
               {canControl && (
@@ -646,23 +667,32 @@ export function RoomView({
         })}
       </nav>
 
-      {/* Floating Reaction Bursts (Mobile: stays visible over Player, Queue, Chat, and People tabs) */}
+      {/* Floating Reaction Bursts (Mobile: staggered lanes visible over all room tabs) */}
       <div
         aria-hidden="true"
-        className="pointer-events-none fixed bottom-28 right-4 z-40 flex h-56 items-end justify-end gap-2 lg:hidden"
+        className="pointer-events-none fixed bottom-28 right-0 z-40 h-60 w-44 lg:hidden"
       >
-        {reactions.map((r) => (
-          <div
-            key={r.id}
-            data-testid="reaction-burst-mobile"
-            className="animate-reaction-float flex flex-col items-center rounded-xl border border-white/15 bg-slate-950/85 px-2.5 py-1.5 text-center shadow-lg backdrop-blur-sm"
-          >
-            <span className="text-2xl leading-none">{r.emoji}</span>
-            <span className="mt-1 max-w-[96px] truncate text-[10px] font-medium text-slate-100">
-              {r.username}
-            </span>
-          </div>
-        ))}
+        {reactions.map((r) => {
+          const laneClass =
+            MOBILE_REACTION_LANES[reactionLaneIndex(r.id, MOBILE_REACTION_LANES.length)];
+          return (
+            <div
+              key={r.id}
+              data-testid="reaction-burst-mobile"
+              className={`animate-reaction-float absolute bottom-0 flex flex-col items-center rounded-2xl border border-white/15 bg-slate-950/85 px-2.5 py-1.5 text-center shadow-xl backdrop-blur-md ${laneClass}`}
+            >
+              {r.comboCount && r.comboCount >= 2 && (
+                <span className="absolute -right-2 -top-2 rounded-full bg-orange-600 px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none text-white shadow-sm tabular-nums">
+                  ×{r.comboCount}
+                </span>
+              )}
+              <span className="text-2xl leading-none">{r.emoji}</span>
+              <span className="mt-1 max-w-[84px] truncate text-[10px] font-medium text-slate-100">
+                {r.username}
+              </span>
+            </div>
+          );
+        })}
       </div>
 
       {/* Add Music Modal */}

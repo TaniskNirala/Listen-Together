@@ -33,19 +33,23 @@
 @keyframes reaction-float {
   0% {
     opacity: 0;
-    transform: translateY(10px) scale(0.85);
+    transform: translate3d(0, 14px, 0) scale(0.75);
   }
-  15% {
+  14% {
     opacity: 1;
-    transform: translateY(-16px) scale(1.06);
+    transform: translate3d(calc(var(--reaction-sway, 0px) * 0.4), -18px, 0) scale(1.12);
+  }
+  30% {
+    opacity: 1;
+    transform: translate3d(var(--reaction-sway, 0px), -48px, 0) scale(1);
   }
   75% {
-    opacity: 0.95;
-    transform: translateY(-96px) scale(1);
+    opacity: 0.94;
+    transform: translate3d(calc(var(--reaction-sway, 0px) * -0.5), -118px, 0) scale(0.98);
   }
   100% {
     opacity: 0;
-    transform: translateY(-136px) scale(0.94);
+    transform: translate3d(calc(var(--reaction-sway, 0px) * 0.3), -168px, 0) scale(0.9);
   }
 }
 
@@ -64,9 +68,34 @@
   }
 }
 
+@keyframes chat-highlight {
+  0% {
+    background-color: rgba(234, 88, 12, 0.22);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
 .animate-reaction-float {
   will-change: transform, opacity;
-  animation: reaction-float 2.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: reaction-float 2.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.reaction-sway-left {
+  --reaction-sway: -14px;
+}
+
+.reaction-sway-mid {
+  --reaction-sway: 6px;
+}
+
+.reaction-sway-right {
+  --reaction-sway: 14px;
+}
+
+.animate-chat-highlight {
+  animation: chat-highlight 1.6s ease-out;
 }
 
 @media (prefers-reduced-motion: reduce) {

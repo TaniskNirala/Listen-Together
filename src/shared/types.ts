@@ -40,6 +40,12 @@ export interface HistoryItem {
   playedAt: string;
 }
 
+export interface ChatReplyReference {
+  id: string;
+  username: string;
+  body: string;
+}
+
 export interface ChatMessage {
   id: string;
   roomId: number;
@@ -47,6 +53,7 @@ export interface ChatMessage {
   username: string;
   body: string;
   createdAt: string;
+  replyTo?: ChatReplyReference | null;
 }
 
 export interface RoomListener {
@@ -99,6 +106,7 @@ export interface ReactionEvent {
   emoji: string;
   username: string;
   timestamp: number;
+  comboCount?: number;
 }
 
 export interface PlaylistImportProgress {

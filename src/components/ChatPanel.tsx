@@ -1,12 +1,13 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { Send } from 'lucide-react';
-import { REACTION_EMOJIS } from '../shared/validation';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { CornerDownRight, Reply, Send, X } from 'lucide-react';
+import { buildReplySnippet } from '../shared/validation';
 import type { ChatMessage } from '../shared/types';
+import { ReactionPicker } from './ReactionPicker';
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   currentUsername: string;
-  onSendMessage: (body: string) => void;
+  onSendMessage: (body: string, replyToId?: string) => void;
   onSendReaction: (emoji: string) => void;
 }
 
@@ -17,24 +18,63 @@ export function ChatPanel({
   onSendReaction,
 }: ChatPanelProps) {
   const [draft, setDraft] = useState('');
+  const [replyingTo, setReplyingTo] = useState<ChatMessage | null>(null);
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const msgRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const highlightTimerRef = useRef<number | null>(null);
+
+  const messagesById = useMemo(() => {
+    const map = new Map<string, ChatMessage>();
+    for (const m of messages) map.set(m.id, m);
+    return map;
+  }, [messages]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [messages.length]);
 
+  useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    };
+  }, []);
+
+  const handleStartReply = (msg: ChatMessage) => {
+    setReplyingTo(msg);
+    inputRef.current?.focus();
+  };
+
+  const handleJumpToMessage = (targetId: string) => {
+    const el = msgRefs.current.get(targetId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setHighlightedId(targetId);
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = window.setTimeout(() => setHighlightedId(null), 1650);
+  };
+
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     const cleaned = draft.trim();
     if (!cleaned) return;
-    onSendMessage(cleaned);
+    onSendMessage(cleaned, replyingTo?.id);
     setDraft('');
+    setReplyingTo(null);
+  };
+
+  const handleInputKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Escape' && replyingTo) {
+      e.preventDefault();
+      setReplyingTo(null);
+    }
   };
 
   return (
     <div className="flex h-full flex-col">
       {/* Messages */}
-      <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+      <div className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
         {messages.length === 0 ? (
           <div className="py-12 text-center text-xs text-slate-500 dark:text-slate-400">
             No messages yet. Say hello to the room.
@@ -46,23 +86,66 @@ export function ChatPanel({
               hour: '2-digit',
               minute: '2-digit',
             });
+            const isHighlighted = highlightedId === msg.id;
+            const liveReplyTarget = msg.replyTo ? messagesById.get(msg.replyTo.id) : undefined;
+            const replyUsername = liveReplyTarget?.username || msg.replyTo?.username || '';
+            const replySnippet = msg.replyTo?.body || '';
+
             return (
-              <div key={msg.id} className="space-y-0.5">
-                <div className="flex items-baseline gap-2 text-xs">
-                  <span
-                    className={`font-semibold ${
-                      isMine
-                        ? 'text-orange-600 dark:text-orange-400'
-                        : 'text-slate-800 dark:text-slate-200'
-                    }`}
+              <div
+                key={msg.id}
+                ref={(node) => {
+                  if (node) msgRefs.current.set(msg.id, node);
+                  else msgRefs.current.delete(msg.id);
+                }}
+                className={`group rounded-xl px-2 py-1.5 transition-colors hover:bg-slate-50 dark:hover:bg-[#1A202E]/60 ${
+                  isHighlighted ? 'animate-chat-highlight ring-1 ring-orange-500/40' : ''
+                }`}
+              >
+                {msg.replyTo && (
+                  <button
+                    type="button"
+                    onClick={() => handleJumpToMessage(msg.replyTo!.id)}
+                    aria-label={`Jump to message from ${replyUsername}`}
+                    className="mb-1 flex w-full items-center gap-1.5 rounded-lg border-l-2 border-orange-500/75 bg-slate-100/80 px-2 py-1 text-left text-[11px] text-slate-600 transition-colors hover:bg-slate-200/70 dark:bg-[#0B0E14]/80 dark:text-slate-400 dark:hover:bg-[#1E2636]"
                   >
-                    {msg.username}
-                  </span>
-                  <span className="font-mono text-[11px] text-slate-400 tabular-nums dark:text-slate-500">
-                    {time}
-                  </span>
+                    <CornerDownRight className="h-3 w-3 shrink-0 text-orange-500" aria-hidden="true" />
+                    <span className="shrink-0 font-semibold text-slate-800 dark:text-slate-200">
+                      {replyUsername}
+                    </span>
+                    <span className="min-w-0 truncate">{replySnippet}</span>
+                  </button>
+                )}
+
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-baseline gap-2 text-xs">
+                    <span
+                      className={`font-semibold ${
+                        isMine
+                          ? 'text-orange-600 dark:text-orange-400'
+                          : 'text-slate-800 dark:text-slate-200'
+                      }`}
+                    >
+                      {msg.username}
+                    </span>
+                    <span className="font-mono text-[11px] text-slate-400 tabular-nums dark:text-slate-500">
+                      {time}
+                    </span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => handleStartReply(msg)}
+                    aria-label={`Reply to ${msg.username}`}
+                    title={`Reply to ${msg.username}`}
+                    className="inline-flex h-6 items-center gap-1 rounded-md px-1.5 text-[11px] font-medium text-slate-500 opacity-85 transition-opacity hover:bg-slate-200/70 hover:text-slate-900 focus:opacity-100 sm:opacity-0 sm:group-hover:opacity-100 dark:text-slate-400 dark:hover:bg-[#242C3D] dark:hover:text-slate-100"
+                  >
+                    <Reply className="h-3 w-3" aria-hidden="true" />
+                    <span>Reply</span>
+                  </button>
                 </div>
-                <p className="break-words text-sm leading-snug text-slate-700 dark:text-slate-300">
+
+                <p className="mt-0.5 break-words text-sm leading-snug text-slate-700 dark:text-slate-300">
                   {msg.body}
                 </p>
               </div>
@@ -72,25 +155,40 @@ export function ChatPanel({
         <div ref={endRef} />
       </div>
 
-      {/* Quick Reactions */}
+      {/* Quick Reactions + Expanded Picker */}
       <div className="flex items-center justify-between border-t border-slate-200 px-3 py-2 dark:border-[#1E2636]">
         <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">
           React
         </span>
-        <div className="flex items-center gap-1">
-          {REACTION_EMOJIS.map((emoji) => (
-            <button
-              key={emoji}
-              type="button"
-              onClick={() => onSendReaction(emoji)}
-              aria-label={`Send ${emoji} reaction`}
-              className="flex h-9 w-9 items-center justify-center rounded-lg text-base transition-transform hover:bg-slate-100 active:scale-110 dark:hover:bg-[#1A202E]"
-            >
-              {emoji}
-            </button>
-          ))}
-        </div>
+        <ReactionPicker onSendReaction={onSendReaction} align="right" compact />
       </div>
+
+      {/* Active Reply Banner */}
+      {replyingTo && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center justify-between gap-2 border-t border-orange-500/25 bg-orange-500/10 px-3 py-2 text-xs dark:bg-orange-500/10"
+        >
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1 font-semibold text-orange-700 dark:text-orange-300">
+              <Reply className="h-3 w-3 shrink-0" aria-hidden="true" />
+              <span className="truncate">Replying to {replyingTo.username}</span>
+            </div>
+            <p className="truncate text-[11px] text-slate-600 dark:text-slate-300">
+              {buildReplySnippet(replyingTo.body, 90)}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setReplyingTo(null)}
+            aria-label="Cancel reply"
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-200/70 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-[#1E2636]"
+          >
+            <X className="h-3.5 w-3.5" aria-hidden="true" />
+          </button>
+        </div>
+      )}
 
       {/* Message Composer */}
       <form
@@ -101,12 +199,14 @@ export function ChatPanel({
           Chat message
         </label>
         <input
+          ref={inputRef}
           id="room-chat-input"
           type="text"
           maxLength={500}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder="Message the room..."
+          onKeyDown={handleInputKeyDown}
+          placeholder={replyingTo ? `Reply to ${replyingTo.username}...` : 'Message the room...'}
           className="h-10 flex-1 rounded-xl border border-slate-300 bg-white px-3 text-sm text-slate-900 placeholder:text-slate-400 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20 dark:border-[#2A3347] dark:bg-[#0B0E14] dark:text-slate-100"
         />
         <button

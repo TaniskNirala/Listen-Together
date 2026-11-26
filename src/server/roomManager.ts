@@ -4,9 +4,11 @@ import { config } from './config';
 import { logger } from './logger';
 import { hashPassword, verifyPassword } from './auth';
 import { computeExpectedPositionSec, computeNextTrackTransition } from '../shared/sync';
+import { buildReplySnippet } from '../shared/validation';
 import type {
   AuthUser,
   ChatMessage,
+  ChatReplyReference,
   ControlMode,
   HistoryItem,
   RepeatMode,
@@ -66,6 +68,9 @@ interface ChatRow {
   user_id: number | null;
   username: string;
   body: string;
+  reply_to_id: string | null;
+  reply_to_username: string | null;
+  reply_to_body: string | null;
   created_at: string;
 }
 
@@ -349,7 +354,8 @@ class RoomManager {
         [row.id, config.maxHistoryItems]
       ),
       db.query<ChatRow>(
-        `SELECT id, room_id, user_id, username, body, created_at
+        `SELECT id, room_id, user_id, username, body,
+                reply_to_id, reply_to_username, reply_to_body, created_at
          FROM chat_messages
          WHERE room_id = $1
          ORDER BY created_at DESC
@@ -393,6 +399,14 @@ class RoomManager {
         username: c.username,
         body: c.body,
         createdAt: c.created_at,
+        replyTo:
+          c.reply_to_id && c.reply_to_username && c.reply_to_body
+            ? {
+                id: c.reply_to_id,
+                username: c.reply_to_username,
+                body: c.reply_to_body,
+              }
+            : null,
       }))
       .reverse();
 
@@ -857,19 +871,60 @@ class RoomManager {
     room: RoomRuntime,
     user: AuthUser,
     body: string,
-    clientMessageId?: string
+    clientMessageId?: string,
+    replyToId?: string
   ): Promise<ChatMessage | null> {
     const id = clientMessageId || crypto.randomUUID();
     if (room.chat.some((m) => m.id === id)) {
       return null; // Idempotent guard
     }
 
+    let replyTo: ChatReplyReference | null = null;
+    if (replyToId) {
+      const inMem = room.chat.find((m) => m.id === replyToId);
+      if (inMem) {
+        replyTo = {
+          id: inMem.id,
+          username: inMem.username,
+          body: buildReplySnippet(inMem.body),
+        };
+      } else {
+        const refRes = await db.query<{ id: string; username: string; body: string }>(
+          `SELECT id, username, body
+           FROM chat_messages
+           WHERE room_id = $1 AND id = $2
+           LIMIT 1`,
+          [room.id, replyToId]
+        );
+        const refRow = refRes.rows[0];
+        if (refRow) {
+          replyTo = {
+            id: refRow.id,
+            username: refRow.username,
+            body: buildReplySnippet(refRow.body),
+          };
+        }
+      }
+    }
+
     const res = await db.query<{ created_at: string }>(
-      `INSERT INTO chat_messages (id, room_id, user_id, username, body)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO chat_messages (
+         id, room_id, user_id, username, body,
+         reply_to_id, reply_to_username, reply_to_body
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO NOTHING
        RETURNING created_at`,
-      [id, room.id, user.id, user.username, body]
+      [
+        id,
+        room.id,
+        user.id,
+        user.username,
+        body,
+        replyTo?.id ?? null,
+        replyTo?.username ?? null,
+        replyTo?.body ?? null,
+      ]
     );
     if (res.rows.length === 0) return null;
 
@@ -880,6 +935,7 @@ class RoomManager {
       username: user.username,
       body,
       createdAt: res.rows[0].created_at,
+      replyTo,
     };
 
     room.chat.push(msg);

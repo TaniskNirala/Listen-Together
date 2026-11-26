@@ -57,6 +57,7 @@ export default function App() {
   const activeRoomCodeRef = useRef<string | null>(null);
   const activeRoomPasswordRef = useRef<string | undefined>(undefined);
   const reactionTimersRef = useRef<Set<number>>(new Set());
+  const reactionComboRef = useRef<Map<string, { count: number; lastAt: number }>>(new Map());
   activeRoomCodeRef.current = activeRoom?.code ?? null;
   const userId = user?.id ?? null;
 
@@ -263,11 +264,26 @@ export default function App() {
     };
 
     const onReactionBurst = (event: ReactionEvent) => {
-      setReactions((prev) => [...prev.slice(-11), event]);
+      const now = Date.now();
+      const comboKey = `${event.username}:${event.emoji}`;
+      const prevCombo = reactionComboRef.current.get(comboKey);
+      const nextCount = prevCombo && now - prevCombo.lastAt <= 2200 ? prevCombo.count + 1 : 1;
+      reactionComboRef.current.set(comboKey, { count: nextCount, lastAt: now });
+      if (reactionComboRef.current.size > 40) {
+        for (const [key, val] of reactionComboRef.current.entries()) {
+          if (now - val.lastAt > 4000) reactionComboRef.current.delete(key);
+        }
+      }
+
+      const enriched: ReactionEvent = {
+        ...event,
+        comboCount: nextCount >= 2 ? nextCount : undefined,
+      };
+      setReactions((prev) => [...prev.slice(-15), enriched]);
       const timerId = window.setTimeout(() => {
         reactionTimersRef.current.delete(timerId);
         setReactions((prev) => prev.filter((r) => r.id !== event.id));
-      }, 2500);
+      }, 2650);
       reactionTimersRef.current.add(timerId);
     };
 
@@ -493,8 +509,12 @@ export default function App() {
             emitWithAck('member:role', { targetUserId, role })
           }
           onKickMember={(targetUserId) => emitWithAck('member:kick', { targetUserId })}
-          onSendChat={(body) =>
-            emitWithAck('chat:send', { body, clientMessageId: crypto.randomUUID() })
+          onSendChat={(body, replyToId) =>
+            emitWithAck('chat:send', {
+              body,
+              replyToId,
+              clientMessageId: crypto.randomUUID(),
+            })
           }
           onSendReaction={(emoji) => emitWithAck('reaction:send', { emoji })}
           onNotify={notify}

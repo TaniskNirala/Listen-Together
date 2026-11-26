@@ -84,7 +84,9 @@ class Database {
       logger.info('db_initialized', { mode: 'pg', maxPool: 5, ssl: useSsl });
     } else {
       this.mode = 'pglite';
-      const dataDir = path.resolve(process.cwd(), '.data', 'pglite');
+      const dataDir = process.env.PGLITE_DATA_DIR
+        ? path.resolve(process.env.PGLITE_DATA_DIR)
+        : path.resolve(process.cwd(), '.data', 'pglite');
       fs.mkdirSync(dataDir, { recursive: true });
       this.pglite = new PGlite(dataDir);
       await this.pglite.waitReady;

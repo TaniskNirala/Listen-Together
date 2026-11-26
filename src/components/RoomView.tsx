@@ -18,6 +18,7 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { computeExpectedPositionSec, formatDuration } from '../shared/sync';
+import { REACTION_EMOJIS } from '../shared/validation';
 import type {
   AuthUser,
   ControlMode,
@@ -278,18 +279,21 @@ export function RoomView({
                 onDurationDiscovered={onDurationDiscovered}
               />
 
-              {/* Floating Reaction Bursts */}
+              {/* Floating Reaction Bursts (Desktop: full 16:9 stage height so upward float never clips) */}
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-x-4 bottom-3 z-20 flex justify-end gap-2 overflow-hidden"
+                className="pointer-events-none absolute inset-0 z-20 hidden items-end justify-end gap-2 overflow-hidden p-4 lg:flex"
               >
                 {reactions.map((r) => (
                   <div
                     key={r.id}
-                    className="animate-reaction-float flex flex-col items-center rounded-xl bg-slate-950/70 px-2.5 py-1 text-center backdrop-blur-sm"
+                    data-testid="reaction-burst"
+                    className="animate-reaction-float flex flex-col items-center rounded-xl border border-white/15 bg-slate-950/85 px-2.5 py-1.5 text-center shadow-lg backdrop-blur-sm"
                   >
-                    <span className="text-xl leading-none">{r.emoji}</span>
-                    <span className="mt-0.5 text-[10px] text-slate-200">{r.username}</span>
+                    <span className="text-2xl leading-none">{r.emoji}</span>
+                    <span className="mt-1 max-w-[96px] truncate text-[10px] font-medium text-slate-100">
+                      {r.username}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -477,19 +481,38 @@ export function RoomView({
               </div>
             </div>
 
-            {/* Keyboard shortcuts hint */}
-            {canControl && (
-              <p className="mt-3 hidden text-[11px] text-slate-400 lg:block dark:text-slate-500">
-                Shortcuts: Space to play/pause · N to skip to next track
-              </p>
-            )}
+            {/* Quick Reactions + Keyboard shortcuts hint */}
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-3 dark:border-[#1E2636]/70">
+              <div className="flex items-center gap-1" role="group" aria-label="Quick reactions">
+                <span className="mr-1 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                  React
+                </span>
+                {REACTION_EMOJIS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    type="button"
+                    onClick={() => onSendReaction(emoji)}
+                    aria-label={`React with ${emoji}`}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg text-base transition-transform hover:bg-slate-100 active:scale-125 dark:hover:bg-[#1A202E]"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
+
+              {canControl && (
+                <p className="hidden text-[11px] text-slate-400 lg:block dark:text-slate-500">
+                  Space: play/pause · N: skip
+                </p>
+              )}
+            </div>
           </div>
         </section>
 
         {/* Right: Tabbed Queue / Chat / Listeners Panel */}
         <aside
           aria-label="Room queue, chat, and listeners"
-          className={`min-w-0 flex h-[calc(100vh-12.5rem)] min-h-[460px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white lg:col-span-5 lg:h-full lg:max-h-[680px] dark:border-[#242C3D] dark:bg-[#131822] ${
+          className={`min-w-0 flex h-[calc(100dvh-16.5rem)] min-h-[380px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white lg:col-span-5 lg:h-full lg:max-h-[680px] dark:border-[#242C3D] dark:bg-[#131822] ${
             mobileTab !== 'player' ? 'flex' : 'hidden lg:flex'
           }`}
         >
@@ -622,6 +645,25 @@ export function RoomView({
           );
         })}
       </nav>
+
+      {/* Floating Reaction Bursts (Mobile: stays visible over Player, Queue, Chat, and People tabs) */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none fixed bottom-28 right-4 z-40 flex h-56 items-end justify-end gap-2 lg:hidden"
+      >
+        {reactions.map((r) => (
+          <div
+            key={r.id}
+            data-testid="reaction-burst-mobile"
+            className="animate-reaction-float flex flex-col items-center rounded-xl border border-white/15 bg-slate-950/85 px-2.5 py-1.5 text-center shadow-lg backdrop-blur-sm"
+          >
+            <span className="text-2xl leading-none">{r.emoji}</span>
+            <span className="mt-1 max-w-[96px] truncate text-[10px] font-medium text-slate-100">
+              {r.username}
+            </span>
+          </div>
+        ))}
+      </div>
 
       {/* Add Music Modal */}
       {showAddModal && (

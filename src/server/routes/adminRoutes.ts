@@ -2,7 +2,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../db';
 import {
+  AccountRenameError,
   hashPassword,
+  renameUserAccount,
   requireAdmin,
   requireAuth,
   type AuthedRequest,
@@ -10,7 +12,7 @@ import {
 } from '../auth';
 import { roomManager } from '../roomManager';
 import { destroyUserSessions } from '../sessionStore';
-import { disconnectUserSockets } from '../socket';
+import { disconnectUserSockets, syncUserRenameAcrossSockets } from '../socket';
 import { logger } from '../logger';
 import type { AdminUserRecord } from '../../shared/types';
 
@@ -160,6 +162,36 @@ router.post('/users/:id/reset-password', async (req: AuthedRequest, res) => {
       message: err instanceof Error ? err.message : String(err),
     });
     res.status(500).json({ error: 'Failed to reset password.' });
+  }
+});
+
+router.patch('/users/:id/username', async (req: AuthedRequest, res) => {
+  try {
+    const targetId = Number.parseInt(req.params.id, 10);
+    if (!Number.isFinite(targetId)) {
+      res.status(400).json({ error: 'Invalid user ID.' });
+      return;
+    }
+
+    const rawUsername = typeof req.body?.username === 'string' ? req.body.username : '';
+    const updatedUser = await renameUserAccount(targetId, rawUsername);
+    syncUserRenameAcrossSockets(targetId, updatedUser);
+
+    logger.info('admin_renamed_user', {
+      actor: req.user?.username,
+      targetId,
+      newUsername: updatedUser.username,
+    });
+    res.json({ user: updatedUser });
+  } catch (err) {
+    if (err instanceof AccountRenameError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    logger.error('admin_rename_user_error', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({ error: 'Failed to update username.' });
   }
 });
 

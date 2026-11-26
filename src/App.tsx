@@ -9,6 +9,7 @@ import { AuthView } from './components/AuthView';
 import { LobbyView } from './components/LobbyView';
 import { AdminPanel } from './components/AdminPanel';
 import { RoomView } from './components/RoomView';
+import { ChangeUsernameModal } from './components/ChangeUsernameModal';
 import { ReconnectingOverlay } from './components/ReconnectingOverlay';
 import { ToastContainer, type ToastItem } from './components/ToastContainer';
 import type {
@@ -51,10 +52,13 @@ export default function App() {
   const [reactions, setReactions] = useState<ReactionEvent[]>([]);
   const [importProgress, setImportProgress] = useState<PlaylistImportProgress | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [showRenameModal, setShowRenameModal] = useState(false);
 
   const activeRoomCodeRef = useRef<string | null>(null);
   const activeRoomPasswordRef = useRef<string | undefined>(undefined);
+  const reactionTimersRef = useRef<Set<number>>(new Set());
   activeRoomCodeRef.current = activeRoom?.code ?? null;
+  const userId = user?.id ?? null;
 
   const notify = useCallback(
     (message: string, tone: ToastItem['tone'] = 'info') => {
@@ -155,7 +159,7 @@ export default function App() {
 
   // Manage Socket.IO lifecycle, auto-reconnect, retry countdown, and room resync
   useEffect(() => {
-    if (!user) {
+    if (!userId) {
       disconnectSocket();
       setSocketConnected(false);
       setReconnecting(false);
@@ -259,10 +263,30 @@ export default function App() {
     };
 
     const onReactionBurst = (event: ReactionEvent) => {
-      setReactions((prev) => [...prev.slice(-10), event]);
-      window.setTimeout(() => {
+      setReactions((prev) => [...prev.slice(-11), event]);
+      const timerId = window.setTimeout(() => {
+        reactionTimersRef.current.delete(timerId);
         setReactions((prev) => prev.filter((r) => r.id !== event.id));
-      }, 2300);
+      }, 2500);
+      reactionTimersRef.current.add(timerId);
+    };
+
+    const onUserUpdated = (payload: { user?: AuthUser }) => {
+      if (payload?.user) {
+        setUser(payload.user);
+      }
+    };
+
+    const onChatUserRenamed = (payload: { userId: number; username: string }) => {
+      setActiveRoom((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          chat: prev.chat.map((msg) =>
+            msg.userId === payload.userId ? { ...msg, username: payload.username } : msg
+          ),
+        };
+      });
     };
 
     const onRoomToast = (payload: { message: string; tone?: ToastItem['tone'] }) => {
@@ -297,7 +321,9 @@ export default function App() {
     s.on('room:listeners', onListenersUpdate);
     s.on('room:my_role', onMyRole);
     s.on('chat:message', onChatMessage);
+    s.on('chat:user_renamed', onChatUserRenamed);
     s.on('reaction:burst', onReactionBurst);
+    s.on('auth:user_updated', onUserUpdated);
     s.on('room:toast', onRoomToast);
     s.on('room:kicked', onRoomKicked);
     s.on('auth:revoked', onAuthRevoked);
@@ -311,6 +337,10 @@ export default function App() {
 
     return () => {
       if (countdownTimer) window.clearInterval(countdownTimer);
+      for (const timerId of reactionTimersRef.current) {
+        window.clearTimeout(timerId);
+      }
+      reactionTimersRef.current.clear();
       s.off('connect', onConnect);
       s.off('disconnect', onDisconnect);
       s.off('connect_error', onConnectError);
@@ -318,13 +348,15 @@ export default function App() {
       s.off('room:listeners', onListenersUpdate);
       s.off('room:my_role', onMyRole);
       s.off('chat:message', onChatMessage);
+      s.off('chat:user_renamed', onChatUserRenamed);
       s.off('reaction:burst', onReactionBurst);
+      s.off('auth:user_updated', onUserUpdated);
       s.off('room:toast', onRoomToast);
       s.off('room:kicked', onRoomKicked);
       s.off('auth:revoked', onAuthRevoked);
       s.off('playlist:import_progress', onImportProgress);
     };
-  }, [user, pendingRoomCode, joinRoomViaSocket, notify]);
+  }, [userId, pendingRoomCode, joinRoomViaSocket, notify]);
 
   const emitWithAck = useCallback(
     (event: string, payload: Record<string, unknown> = {}) => {
@@ -346,9 +378,19 @@ export default function App() {
     const s = getSocket();
     if (s.connected) s.emit('room:leave');
     setActiveRoom(null);
+    setReactions([]);
     activeRoomPasswordRef.current = undefined;
     setActiveView('lobby');
     window.history.replaceState(null, '', '/');
+  };
+
+  const handleRenameSelf = async (nextUsername: string) => {
+    const data = await apiFetch<{ user: AuthUser }>('/api/auth/username', {
+      method: 'PATCH',
+      body: JSON.stringify({ username: nextUsername }),
+    });
+    setUser(data.user);
+    notify(`Username updated to "${data.user.username}".`, 'success');
   };
 
   const handleSignOut = async () => {
@@ -360,6 +402,8 @@ export default function App() {
     disconnectSocket();
     setUser(null);
     setActiveRoom(null);
+    setReactions([]);
+    setShowRenameModal(false);
     setActiveView('lobby');
     window.history.replaceState(null, '', '/');
   };
@@ -396,6 +440,7 @@ export default function App() {
           }
           setActiveView(view);
         }}
+        onOpenRename={() => setShowRenameModal(true)}
         onSignOut={() => void handleSignOut()}
       />
 
@@ -411,6 +456,7 @@ export default function App() {
       ) : activeView === 'admin' && user.role === 'admin' ? (
         <AdminPanel
           currentUser={user}
+          onCurrentUserUpdated={setUser}
           onJumpToRoom={(code) => joinRoomViaSocket(code)}
           onNotify={notify}
         />
@@ -450,7 +496,7 @@ export default function App() {
           onSendChat={(body) =>
             emitWithAck('chat:send', { body, clientMessageId: crypto.randomUUID() })
           }
-          onSendReaction={(emoji) => getSocket().emit('reaction:send', { emoji })}
+          onSendReaction={(emoji) => emitWithAck('reaction:send', { emoji })}
           onNotify={notify}
         />
       ) : (
@@ -513,6 +559,17 @@ export default function App() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Change Own Username Dialog */}
+      {showRenameModal && user && (
+        <ChangeUsernameModal
+          title="Change username"
+          description="Your new username updates immediately in rooms, chat, and sign-in."
+          currentUsername={user.username}
+          onSave={handleRenameSelf}
+          onClose={() => setShowRenameModal(false)}
+        />
       )}
 
       {/* Server Waking Up / Reconnecting Overlay */}

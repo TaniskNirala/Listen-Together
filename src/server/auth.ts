@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from 'express';
 import { db } from './db';
 import { config } from './config';
 import { logger } from './logger';
+import { validateUsername } from '../shared/validation';
 import type { AuthUser, GlobalRole } from '../shared/types';
 
 declare module 'express-session' {
@@ -60,6 +61,54 @@ export async function findUserByUsername(username: string): Promise<UserRow | nu
     [normalized]
   );
   return res.rows[0] ?? null;
+}
+
+export class AccountRenameError extends Error {
+  public readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export async function renameUserAccount(userId: number, rawUsername: string): Promise<AuthUser> {
+  const check = validateUsername(rawUsername);
+  if (!check.ok) {
+    throw new AccountRenameError(400, check.error);
+  }
+
+  const conflict = await db.query<{ id: number }>(
+    'SELECT id FROM users WHERE username_lower = $1 AND id <> $2',
+    [check.usernameLower, userId]
+  );
+  if (conflict.rows.length > 0) {
+    throw new AccountRenameError(409, `Username "${check.username}" is already taken.`);
+  }
+
+  const updated = await db.query<UserRow>(
+    `UPDATE users
+     SET username = $2, username_lower = $3, updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, username, username_lower, password_hash, role, disabled, created_at`,
+    [userId, check.username, check.usernameLower]
+  );
+
+  const row = updated.rows[0];
+  if (!row) {
+    throw new AccountRenameError(404, 'User not found.');
+  }
+
+  // Keep persisted chat and queued track attribution consistent with the new username
+  await Promise.all([
+    db.query('UPDATE chat_messages SET username = $2 WHERE user_id = $1', [userId, row.username]),
+    db.query('UPDATE queue_items SET added_by_username = $2 WHERE added_by_user_id = $1', [
+      userId,
+      row.username,
+    ]),
+  ]);
+
+  return toAuthUser(row);
 }
 
 export async function hasAnyAdmin(): Promise<boolean> {

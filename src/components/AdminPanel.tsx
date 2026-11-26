@@ -1,15 +1,22 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { KeyRound, RefreshCw, Trash2, UserCheck, UserPlus, UserX } from 'lucide-react';
+import { KeyRound, Pencil, RefreshCw, Trash2, UserCheck, UserPlus, UserX } from 'lucide-react';
 import { apiFetch, ApiError } from '../lib/api';
+import { ChangeUsernameModal } from './ChangeUsernameModal';
 import type { AdminUserRecord, AuthUser, GlobalRole } from '../shared/types';
 
 interface AdminPanelProps {
   currentUser: AuthUser;
+  onCurrentUserUpdated: (user: AuthUser) => void;
   onJumpToRoom: (code: string) => void;
   onNotify: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
 }
 
-export function AdminPanel({ currentUser, onJumpToRoom, onNotify }: AdminPanelProps) {
+export function AdminPanel({
+  currentUser,
+  onCurrentUserUpdated,
+  onJumpToRoom,
+  onNotify,
+}: AdminPanelProps) {
   const [users, setUsers] = useState<AdminUserRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -19,10 +26,11 @@ export function AdminPanel({ currentUser, onJumpToRoom, onNotify }: AdminPanelPr
   const [role, setRole] = useState<GlobalRole>('user');
   const [creating, setCreating] = useState(false);
 
-  // Reset password inline modal state
+  // Reset password & rename inline modal state
   const [resetTarget, setResetTarget] = useState<AdminUserRecord | null>(null);
   const [newPassword, setNewPassword] = useState('');
   const [resetting, setResetting] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<AdminUserRecord | null>(null);
 
   const loadUsers = async () => {
     setLoading(true);
@@ -79,6 +87,23 @@ export function AdminPanel({ currentUser, onJumpToRoom, onNotify }: AdminPanelPr
     } finally {
       setResetting(false);
     }
+  };
+
+  const handleRenameUser = async (nextUsername: string) => {
+    if (!renameTarget) return;
+    const data = await apiFetch<{ user: AuthUser }>(`/api/admin/users/${renameTarget.id}/username`, {
+      method: 'PATCH',
+      body: JSON.stringify({ username: nextUsername }),
+    });
+    setUsers((prev) =>
+      prev.map((item) =>
+        item.id === renameTarget.id ? { ...item, username: data.user.username } : item
+      )
+    );
+    if (renameTarget.id === currentUser.id) {
+      onCurrentUserUpdated(data.user);
+    }
+    onNotify(`Renamed "${renameTarget.username}" to "${data.user.username}".`, 'success');
   };
 
   const handleToggleDisable = async (u: AdminUserRecord) => {
@@ -309,6 +334,15 @@ export function AdminPanel({ currentUser, onJumpToRoom, onNotify }: AdminPanelPr
                         <div className="inline-flex items-center justify-end gap-1">
                           <button
                             type="button"
+                            onClick={() => setRenameTarget(u)}
+                            aria-label={`Rename ${u.username}`}
+                            title="Change username"
+                            className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-[#1E2636] dark:hover:text-slate-100"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
                             onClick={() => {
                               setResetTarget(u);
                               setNewPassword('');
@@ -417,6 +451,16 @@ export function AdminPanel({ currentUser, onJumpToRoom, onNotify }: AdminPanelPr
             </form>
           </div>
         </div>
+      )}
+      {/* Rename User Dialog */}
+      {renameTarget && (
+        <ChangeUsernameModal
+          title={`Rename ${renameTarget.username}`}
+          description="Updates this account's login and display username immediately across active rooms."
+          currentUsername={renameTarget.username}
+          onSave={handleRenameUser}
+          onClose={() => setRenameTarget(null)}
+        />
       )}
     </main>
   );

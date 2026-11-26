@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Send } from 'lucide-react';
+import { REACTION_EMOJIS } from '../shared/validation';
 import type { ChatMessage } from '../shared/types';
-
-const REACTION_EMOJIS = ['🔥', '❤️', '👏', '🎵', '🙌', '😮'];
 
 interface ChatPanelProps {
   messages: ChatMessage[];

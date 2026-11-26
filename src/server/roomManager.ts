@@ -919,6 +919,60 @@ class RoomManager {
     await this.persistPlaybackState(room);
     return true;
   }
+
+  /**
+   * Updates cached member, chat, and queue usernames across all loaded rooms when a user renames.
+   */
+  updateUsernameInMemory(
+    userId: number,
+    newUsername: string
+  ): Array<{ room: RoomRuntime; playbackChanged: boolean; chatChanged: boolean }> {
+    const affected: Array<{ room: RoomRuntime; playbackChanged: boolean; chatChanged: boolean }> =
+      [];
+
+    for (const room of this.roomsByCode.values()) {
+      let memberChanged = false;
+      let playbackChanged = false;
+      let chatChanged = false;
+
+      const member = room.members.get(userId);
+      if (member && member.username !== newUsername) {
+        member.username = newUsername;
+        memberChanged = true;
+      }
+
+      if (room.playback.currentTrack && room.playback.currentTrack.addedByUserId === userId) {
+        room.playback.currentTrack = {
+          ...room.playback.currentTrack,
+          addedByUsername: newUsername,
+        };
+        playbackChanged = true;
+      }
+
+      for (let i = 0; i < room.playback.queue.length; i++) {
+        if (room.playback.queue[i].addedByUserId === userId) {
+          room.playback.queue[i] = {
+            ...room.playback.queue[i],
+            addedByUsername: newUsername,
+          };
+          playbackChanged = true;
+        }
+      }
+
+      for (let i = 0; i < room.chat.length; i++) {
+        if (room.chat[i].userId === userId) {
+          room.chat[i] = { ...room.chat[i], username: newUsername };
+          chatChanged = true;
+        }
+      }
+
+      if (memberChanged || playbackChanged || chatChanged) {
+        affected.push({ room, playbackChanged, chatChanged });
+      }
+    }
+
+    return affected;
+  }
 }
 
 export const roomManager = new RoomManager();

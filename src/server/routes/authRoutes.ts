@@ -3,15 +3,18 @@ import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import { db } from '../db';
 import {
+  AccountRenameError,
   findUserByUsername,
   hasAnyAdmin,
   hashPassword,
+  renameUserAccount,
   requireAuth,
   toAuthUser,
   verifyPassword,
   type AuthedRequest,
   type UserRow,
 } from '../auth';
+import { syncUserRenameAcrossSockets } from '../socket';
 import { logger } from '../logger';
 
 const router = Router();
@@ -174,6 +177,42 @@ router.post('/logout', (req, res) => {
 
 router.get('/me', requireAuth, (req: AuthedRequest, res) => {
   res.json({ user: req.user });
+});
+
+const renameLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many username changes. Please wait a few minutes and try again.' },
+});
+
+router.patch('/username', requireAuth, renameLimiter, async (req: AuthedRequest, res) => {
+  try {
+    if (!req.user) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    const rawUsername = typeof req.body?.username === 'string' ? req.body.username : '';
+    const updatedUser = await renameUserAccount(req.user.id, rawUsername);
+    syncUserRenameAcrossSockets(req.user.id, updatedUser);
+
+    logger.info('user_renamed_self', {
+      userId: req.user.id,
+      previousUsername: req.user.username,
+      newUsername: updatedUser.username,
+    });
+    res.json({ user: updatedUser });
+  } catch (err) {
+    if (err instanceof AccountRenameError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    logger.error('user_rename_self_error', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    res.status(500).json({ error: 'Failed to update username.' });
+  }
 });
 
 export default router;

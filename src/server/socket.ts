@@ -12,6 +12,7 @@ import {
   canManageRoom,
 } from './permissions';
 import { roomManager, type RoomRuntime } from './roomManager';
+import { normalizeReactionEmoji } from '../shared/validation';
 import type { AuthUser, PlaylistImportProgress, ReactionEvent } from '../shared/types';
 
 let ioInstance: SocketIOServer | null = null;
@@ -26,8 +27,6 @@ interface SocketData {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyEventMap = Record<string, (...args: any[]) => void>;
 type AuthedSocket = Socket<AnyEventMap, AnyEventMap, AnyEventMap, SocketData>;
-
-const ALLOWED_EMOJIS = new Set(['🔥', '❤️', '👏', '🎵', '🙌', '😮']);
 
 const joinSchema = z.object({
   code: z.string().trim().min(3).max(16),
@@ -136,6 +135,33 @@ export function disconnectUserSockets(userId: number, reason: string): void {
   }
 }
 
+export function syncUserRenameAcrossSockets(userId: number, updatedUser: AuthUser): void {
+  const affectedRooms = roomManager.updateUsernameInMemory(userId, updatedUser.username);
+  if (!ioInstance) return;
+
+  const socketIds = roomManager.getSocketIdsForUser(userId);
+  for (const sid of socketIds) {
+    const s = ioInstance.sockets.sockets.get(sid);
+    if (s) {
+      (s.data as SocketData).user = updatedUser;
+      s.emit('auth:user_updated', { user: updatedUser });
+    }
+  }
+
+  for (const { room, playbackChanged, chatChanged } of affectedRooms) {
+    broadcastRoomListeners(room);
+    if (playbackChanged) {
+      broadcastRoomPlayback(room);
+    }
+    if (chatChanged) {
+      ioInstance.to(getRoomChannel(room.code)).emit('chat:user_renamed', {
+        userId,
+        username: updatedUser.username,
+      });
+    }
+  }
+}
+
 async function getAuthorizedRoomContext(socket: AuthedSocket): Promise<{
   room: RoomRuntime;
   roomRole: 'host' | 'dj' | 'listener';
@@ -228,7 +254,7 @@ export function attachSocketServer(
         const prevCode = socket.data.roomCode;
         const { room, role } = await roomManager.joinRoom({
           code: parsed.data.code,
-          user,
+          user: socket.data.user,
           socketId: socket.id,
           password: parsed.data.password,
         });
@@ -717,7 +743,7 @@ export function attachSocketServer(
         socket.data.lastChatAt = now;
         const msg = await roomManager.addChatMessage(
           ctx.room,
-          user,
+          socket.data.user,
           parsed.data.body,
           parsed.data.clientMessageId
         );
@@ -730,27 +756,43 @@ export function attachSocketServer(
       }
     });
 
-    socket.on('reaction:send', async (rawPayload: unknown) => {
+    socket.on('reaction:send', async (rawPayload: unknown, ack?: (resp: unknown) => void) => {
       try {
         const ctx = await getAuthorizedRoomContext(socket);
-        if (!ctx) return;
+        if (!ctx) {
+          ack?.({ ok: false, error: 'Not connected to a room.' });
+          return;
+        }
 
         const now = Date.now();
-        if (now - socket.data.lastReactionAt < 650) return;
+        if (now - socket.data.lastReactionAt < 250) {
+          ack?.({ ok: true, throttled: true });
+          return;
+        }
 
         const parsed = reactionSchema.safeParse(rawPayload);
-        if (!parsed.success || !ALLOWED_EMOJIS.has(parsed.data.emoji)) return;
+        if (!parsed.success) {
+          ack?.({ ok: false, error: 'Invalid reaction.' });
+          return;
+        }
+
+        const emoji = normalizeReactionEmoji(parsed.data.emoji);
+        if (!emoji) {
+          ack?.({ ok: false, error: 'Unsupported reaction emoji.' });
+          return;
+        }
 
         socket.data.lastReactionAt = now;
         const event: ReactionEvent = {
           id: crypto.randomUUID(),
-          emoji: parsed.data.emoji,
-          username: user.username,
+          emoji,
+          username: socket.data.user.username,
           timestamp: now,
         };
         io.to(getRoomChannel(ctx.room.code)).emit('reaction:burst', event);
+        ack?.({ ok: true });
       } catch {
-        // Non-fatal
+        ack?.({ ok: false, error: 'Could not send reaction.' });
       }
     });
 

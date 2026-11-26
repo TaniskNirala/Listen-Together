@@ -2,6 +2,16 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { Loader2, Lock } from 'lucide-react';
 import { apiFetch, ApiError } from './lib/api';
 import { disconnectSocket, getSocket } from './lib/socket';
+import {
+  installAudioUnlock,
+  playSubtleNotificationSound,
+  readNotificationSoundPreference,
+  writeNotificationSoundPreference,
+} from './lib/sound';
+import {
+  resolveChatNotificationTone,
+  shouldPlayNotificationSound,
+} from './shared/notificationSound';
 import { useTheme } from './hooks/useTheme';
 import { useClockSync } from './hooks/useClockSync';
 import { TopBar, type AppView } from './components/TopBar';
@@ -53,13 +63,30 @@ export default function App() {
   const [importProgress, setImportProgress] = useState<PlaylistImportProgress | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [showRenameModal, setShowRenameModal] = useState(false);
+  const [notificationSoundEnabled, setNotificationSoundEnabled] = useState<boolean>(() =>
+    readNotificationSoundPreference()
+  );
 
   const activeRoomCodeRef = useRef<string | null>(null);
   const activeRoomPasswordRef = useRef<string | undefined>(undefined);
+  const latestPresenceRef = useRef<{ tabActive: boolean; inChat: boolean }>({
+    tabActive: typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+    inChat: false,
+  });
+  const currentUserRef = useRef<AuthUser | null>(null);
+  const notificationSoundEnabledRef = useRef<boolean>(notificationSoundEnabled);
+  const lastSoundAtRef = useRef<number | null>(null);
+  const seenChatIdsRef = useRef<Set<string>>(new Set());
   const reactionTimersRef = useRef<Set<number>>(new Set());
   const reactionComboRef = useRef<Map<string, { count: number; lastAt: number }>>(new Map());
   activeRoomCodeRef.current = activeRoom?.code ?? null;
+  currentUserRef.current = user;
+  notificationSoundEnabledRef.current = notificationSoundEnabled;
   const userId = user?.id ?? null;
+
+  useEffect(() => {
+    return installAudioUnlock();
+  }, []);
 
   const notify = useCallback(
     (message: string, tone: ToastItem['tone'] = 'info') => {
@@ -124,9 +151,17 @@ export default function App() {
         return;
       }
 
+      const isVisible =
+        typeof document === 'undefined' ? true : document.visibilityState === 'visible';
+      const isRejoiningSameRoom = activeRoomCodeRef.current === normalized;
       s.emit(
         'room:join',
-        { code: normalized, password },
+        {
+          code: normalized,
+          password,
+          tabActive: isVisible,
+          inChat: isVisible && isRejoiningSameRoom ? latestPresenceRef.current.inChat : false,
+        },
         (resp?: { ok: boolean; state?: RoomFullState; code?: string; error?: string }) => {
           if (!resp) {
             notify('Timed out joining room. Retrying...', 'warning');
@@ -253,6 +288,36 @@ export default function App() {
     };
 
     const onChatMessage = (msg: ChatMessage) => {
+      const alreadySeen = seenChatIdsRef.current.has(msg.id);
+      if (!alreadySeen) {
+        seenChatIdsRef.current.add(msg.id);
+        if (seenChatIdsRef.current.size > 200) {
+          const oldest = seenChatIdsRef.current.values().next().value;
+          if (oldest) seenChatIdsRef.current.delete(oldest);
+        }
+        const now = Date.now();
+        const me = currentUserRef.current;
+        const isOwnEvent =
+          me !== null &&
+          (msg.userId === me.id || msg.username.toLowerCase() === me.username.toLowerCase());
+        if (
+          shouldPlayNotificationSound({
+            enabled: notificationSoundEnabledRef.current,
+            isOwnEvent,
+            nowMs: now,
+            lastPlayedAtMs: lastSoundAtRef.current,
+          })
+        ) {
+          const tone = resolveChatNotificationTone({
+            replyToUsername: msg.replyTo?.username,
+            currentUsername: me?.username,
+          });
+          if (playSubtleNotificationSound(tone)) {
+            lastSoundAtRef.current = now;
+          }
+        }
+      }
+
       setActiveRoom((prev) => {
         if (!prev) return prev;
         if (prev.chat.some((c) => c.id === msg.id)) return prev;
@@ -307,6 +372,19 @@ export default function App() {
 
     const onRoomToast = (payload: { message: string; tone?: ToastItem['tone'] }) => {
       notify(payload.message, payload.tone || 'info');
+      const now = Date.now();
+      if (
+        shouldPlayNotificationSound({
+          enabled: notificationSoundEnabledRef.current,
+          isOwnEvent: false,
+          nowMs: now,
+          lastPlayedAtMs: lastSoundAtRef.current,
+        })
+      ) {
+        if (playSubtleNotificationSound('room')) {
+          lastSoundAtRef.current = now;
+        }
+      }
     };
 
     const onRoomKicked = (payload: { reason?: string }) => {
@@ -390,12 +468,38 @@ export default function App() {
     [notify]
   );
 
+  const handlePresenceChange = useCallback(
+    (presence: { tabActive: boolean; inChat: boolean }) => {
+      latestPresenceRef.current = presence;
+      const s = getSocket();
+      if (s.connected) {
+        s.emit('presence:update', presence);
+      }
+    },
+    []
+  );
+
+  const handleToggleNotificationSound = useCallback(() => {
+    const next = !notificationSoundEnabledRef.current;
+    notificationSoundEnabledRef.current = next;
+    setNotificationSoundEnabled(next);
+    writeNotificationSoundPreference(next);
+    if (next) {
+      playSubtleNotificationSound('chat');
+      lastSoundAtRef.current = Date.now();
+    }
+  }, []);
+
   const handleLeaveRoom = () => {
     const s = getSocket();
     if (s.connected) s.emit('room:leave');
     setActiveRoom(null);
     setReactions([]);
     activeRoomPasswordRef.current = undefined;
+    latestPresenceRef.current = {
+      tabActive: typeof document === 'undefined' ? true : document.visibilityState === 'visible',
+      inChat: false,
+    };
     setActiveView('lobby');
     window.history.replaceState(null, '', '/');
   };
@@ -517,6 +621,9 @@ export default function App() {
             })
           }
           onSendReaction={(emoji) => emitWithAck('reaction:send', { emoji })}
+          onPresenceChange={handlePresenceChange}
+          notificationSoundEnabled={notificationSoundEnabled}
+          onToggleNotificationSound={handleToggleNotificationSound}
           onNotify={notify}
         />
       ) : (

@@ -1,19 +1,25 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { CornerDownRight, Reply, Send, X } from 'lucide-react';
+import { Bell, BellOff, CornerDownRight, Reply, Send, X } from 'lucide-react';
 import { buildReplySnippet } from '../shared/validation';
-import type { ChatMessage } from '../shared/types';
+import type { ChatMessage, RoomListener } from '../shared/types';
 import { ReactionPicker } from './ReactionPicker';
 
 interface ChatPanelProps {
   messages: ChatMessage[];
+  listeners: RoomListener[];
   currentUsername: string;
+  soundEnabled: boolean;
+  onToggleSound: () => void;
   onSendMessage: (body: string, replyToId?: string) => void;
   onSendReaction: (emoji: string) => void;
 }
 
 export function ChatPanel({
   messages,
+  listeners,
   currentUsername,
+  soundEnabled,
+  onToggleSound,
   onSendMessage,
   onSendReaction,
 }: ChatPanelProps) {
@@ -30,6 +36,34 @@ export function ChatPanel({
     for (const m of messages) map.set(m.id, m);
     return map;
   }, [messages]);
+
+  const listenerById = useMemo(() => {
+    const map = new Map<number, RoomListener>();
+    for (const l of listeners) map.set(l.userId, l);
+    return map;
+  }, [listeners]);
+
+  const listenerByName = useMemo(() => {
+    const map = new Map<string, RoomListener>();
+    for (const l of listeners) map.set(l.username.toLowerCase(), l);
+    return map;
+  }, [listeners]);
+
+  const { inChatListeners, onScreenListeners, backgroundListeners } = useMemo(() => {
+    const inChat: RoomListener[] = [];
+    const onScreen: RoomListener[] = [];
+    const background: RoomListener[] = [];
+    for (const l of listeners) {
+      if (l.inChat) inChat.push(l);
+      else if (l.tabActive) onScreen.push(l);
+      else background.push(l);
+    }
+    return {
+      inChatListeners: inChat,
+      onScreenListeners: onScreen,
+      backgroundListeners: background,
+    };
+  }, [listeners]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -71,8 +105,92 @@ export function ChatPanel({
     }
   };
 
+  const visibleActiveUsers = [...inChatListeners, ...onScreenListeners];
+
   return (
     <div className="flex h-full flex-col">
+      {/* Live On-Screen Chat Presence Bar */}
+      <div
+        data-testid="chat-presence-bar"
+        className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-[11px] dark:border-[#1E2636]"
+      >
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span
+            className={`h-2 w-2 shrink-0 rounded-full ${
+              inChatListeners.length > 0
+                ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)]'
+                : visibleActiveUsers.length > 0
+                ? 'bg-emerald-400/70'
+                : 'bg-slate-400 dark:bg-slate-600'
+            }`}
+            aria-hidden="true"
+          />
+          <span className="truncate font-medium text-slate-700 dark:text-slate-200">
+            {inChatListeners.length > 0 ? (
+              <>
+                <span className="text-emerald-600 dark:text-emerald-400">
+                  {inChatListeners.length} in chat
+                </span>
+                <span className="text-slate-400 dark:text-slate-500"> · </span>
+                <span className="text-slate-600 dark:text-slate-300">
+                  {inChatListeners
+                    .slice(0, 3)
+                    .map((u) => u.username)
+                    .join(', ')}
+                  {inChatListeners.length > 3 ? ` +${inChatListeners.length - 3}` : ''}
+                </span>
+              </>
+            ) : visibleActiveUsers.length > 0 ? (
+              <span className="text-slate-600 dark:text-slate-300">
+                {visibleActiveUsers.length} on screen
+              </span>
+            ) : (
+              <span className="text-slate-500 dark:text-slate-400">No one active on screen</span>
+            )}
+          </span>
+        </div>
+
+        <div className="flex shrink-0 items-center gap-2 text-[11px] text-slate-500 tabular-nums dark:text-slate-400">
+          {onScreenListeners.length > 0 && inChatListeners.length > 0 && (
+            <span title="Tab open on screen (Player/Queue)">
+              {onScreenListeners.length} on player
+            </span>
+          )}
+          {backgroundListeners.length > 0 && (
+            <span
+              className="inline-flex items-center gap-1 text-slate-400 dark:text-slate-500"
+              title={backgroundListeners.map((u) => `${u.username} (background tab)`).join(', ')}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-slate-400 dark:bg-slate-600" aria-hidden="true" />
+              {backgroundListeners.length} away
+            </span>
+          )}
+          <button
+            type="button"
+            data-testid="chat-sound-toggle"
+            onClick={onToggleSound}
+            aria-pressed={soundEnabled}
+            aria-label={soundEnabled ? 'Mute notification sound' : 'Unmute notification sound'}
+            title={
+              soundEnabled
+                ? 'Subtle notification sound on (click to mute)'
+                : 'Notification sound muted (click to turn on)'
+            }
+            className={`inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${
+              soundEnabled
+                ? 'text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-[#1E2636] dark:hover:text-slate-100'
+                : 'text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:text-slate-600 dark:hover:bg-[#1E2636] dark:hover:text-slate-300'
+            }`}
+          >
+            {soundEnabled ? (
+              <Bell className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <BellOff className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+          </button>
+        </div>
+      </div>
+
       {/* Messages */}
       <div className="flex-1 space-y-2 overflow-y-auto px-3 py-3">
         {messages.length === 0 ? (
@@ -90,6 +208,23 @@ export function ChatPanel({
             const liveReplyTarget = msg.replyTo ? messagesById.get(msg.replyTo.id) : undefined;
             const replyUsername = liveReplyTarget?.username || msg.replyTo?.username || '';
             const replySnippet = msg.replyTo?.body || '';
+            const senderListener =
+              (msg.userId !== null ? listenerById.get(msg.userId) : undefined) ||
+              listenerByName.get(msg.username.toLowerCase());
+            const statusDotClass = !senderListener
+              ? null
+              : senderListener.inChat
+              ? 'bg-emerald-500'
+              : senderListener.tabActive
+              ? 'bg-emerald-400/70'
+              : 'bg-slate-400 dark:bg-slate-600';
+            const statusLabel = !senderListener
+              ? undefined
+              : senderListener.inChat
+              ? 'Active in chat (tab open on screen)'
+              : senderListener.tabActive
+              ? 'Tab open on screen'
+              : 'Tab in background';
 
             return (
               <div
@@ -118,7 +253,14 @@ export function ChatPanel({
                 )}
 
                 <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-baseline gap-2 text-xs">
+                  <div className="flex items-center gap-1.5 text-xs">
+                    {statusDotClass && (
+                      <span
+                        title={statusLabel}
+                        aria-label={statusLabel}
+                        className={`h-2 w-2 shrink-0 rounded-full ${statusDotClass}`}
+                      />
+                    )}
                     <span
                       className={`font-semibold ${
                         isMine

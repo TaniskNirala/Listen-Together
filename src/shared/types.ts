@@ -61,6 +61,8 @@ export interface RoomListener {
   username: string;
   role: RoomRole;
   online: boolean;
+  tabActive: boolean;
+  inChat: boolean;
 }
 
 export interface RoomPlaybackState {

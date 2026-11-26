@@ -4,6 +4,7 @@ import { config } from './config';
 import { logger } from './logger';
 import { hashPassword, verifyPassword } from './auth';
 import { computeExpectedPositionSec, computeNextTrackTransition } from '../shared/sync';
+import { aggregateUserPresence } from '../shared/presence';
 import { buildReplySnippet } from '../shared/validation';
 import type {
   AuthUser,
@@ -95,6 +96,8 @@ interface GlobalSocketPresence {
   userId: number;
   roomCode: string | null;
   roomName: string | null;
+  tabActive: boolean;
+  inChat: boolean;
 }
 
 function parseJsonField<T>(value: T | string | null): T | null {
@@ -140,7 +143,27 @@ class RoomManager {
       userId,
       roomCode: null,
       roomName: null,
+      tabActive: true,
+      inChat: false,
     });
+  }
+
+  updateSocketPresence(
+    socketId: string,
+    params: { tabActive: boolean; inChat: boolean }
+  ): { changed: boolean; roomCode: string | null } {
+    const presence = this.socketPresence.get(socketId);
+    if (!presence) return { changed: false, roomCode: null };
+
+    const nextTabActive = Boolean(params.tabActive);
+    const nextInChat = nextTabActive && Boolean(params.inChat);
+    if (presence.tabActive === nextTabActive && presence.inChat === nextInChat) {
+      return { changed: false, roomCode: presence.roomCode };
+    }
+
+    presence.tabActive = nextTabActive;
+    presence.inChat = nextInChat;
+    return { changed: true, roomCode: presence.roomCode };
   }
 
   unregisterSocket(socketId: string): { leftRoomCode: string | null; userId: number | null } {
@@ -444,6 +467,8 @@ class RoomManager {
     user: AuthUser;
     socketId: string;
     password?: string;
+    tabActive?: boolean;
+    inChat?: boolean;
   }): Promise<{ room: RoomRuntime; role: RoomRole }> {
     const room = await this.getOrLoadRoom(params.code);
     if (!room) {
@@ -513,11 +538,16 @@ class RoomManager {
     }
     sockets.add(params.socketId);
 
+    const tabActive = params.tabActive ?? prev?.tabActive ?? true;
+    const inChat = tabActive && (params.inChat ?? prev?.inChat ?? false);
+
     this.socketPresence.set(params.socketId, {
       socketId: params.socketId,
       userId: params.user.id,
       roomCode: room.code,
       roomName: room.name,
+      tabActive,
+      inChat,
     });
 
     return { room, role };
@@ -529,11 +559,23 @@ class RoomManager {
       if (sockets.size === 0) continue;
       const member = room.members.get(userId);
       if (!member || member.kicked) continue;
+
+      const socketSnapshots = Array.from(sockets).map((sid) => {
+        const p = this.socketPresence.get(sid);
+        return {
+          tabActive: p ? p.tabActive : true,
+          inChat: p ? p.inChat : false,
+        };
+      });
+      const aggregated = aggregateUserPresence(socketSnapshots);
+
       list.push({
         userId: member.userId,
         username: member.username,
         role: member.role,
         online: true,
+        tabActive: aggregated.tabActive,
+        inChat: aggregated.inChat,
       });
     }
 

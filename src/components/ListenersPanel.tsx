@@ -80,6 +80,23 @@ export function ListenersPanel({
               <li key={member.userId} className="flex items-center justify-between gap-3 py-2.5">
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5">
+                    <span
+                      className={`h-2 w-2 shrink-0 rounded-full ${
+                        member.inChat
+                          ? 'bg-emerald-500'
+                          : member.tabActive
+                          ? 'bg-emerald-400/75'
+                          : 'bg-slate-400 dark:bg-slate-600'
+                      }`}
+                      title={
+                        member.inChat
+                          ? 'Active in chat (tab open on screen)'
+                          : member.tabActive
+                          ? 'Tab open on screen'
+                          : 'Tab in background'
+                      }
+                      aria-hidden="true"
+                    />
                     <span className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
                       {member.username}
                     </span>
@@ -87,13 +104,25 @@ export function ListenersPanel({
                       <span className="text-xs text-slate-400 dark:text-slate-500">(you)</span>
                     )}
                   </div>
-                  <div className="mt-0.5 flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">
+                  <div className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                     {member.role === 'host' ? (
                       <Crown className="h-3 w-3 text-orange-500" aria-hidden="true" />
                     ) : member.role === 'dj' ? (
                       <Disc3 className="h-3 w-3 text-emerald-500" aria-hidden="true" />
                     ) : null}
                     <span>{roleLabel}</span>
+                    <span aria-hidden="true">·</span>
+                    <span
+                      className={
+                        member.inChat
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : member.tabActive
+                          ? 'text-slate-600 dark:text-slate-300'
+                          : 'text-slate-400 dark:text-slate-500'
+                      }
+                    >
+                      {member.inChat ? 'In chat' : member.tabActive ? 'On screen' : 'Background'}
+                    </span>
                   </div>
                 </div>
 

@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/shared/sync.test.ts src/shared/validation.test.ts src/server/permissions.test.ts src/server/providers/parsers.test.ts src/server/providers/youtubeSearchParsers.test.ts src/server/config.test.ts"
+    "test": "tsx --test src/shared/sync.test.ts src/shared/validation.test.ts src/shared/presence.test.ts src/shared/notificationSound.test.ts src/server/permissions.test.ts src/server/providers/parsers.test.ts src/server/providers/youtubeSearchParsers.test.ts src/server/config.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.6.0",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft,
   Check,
@@ -17,6 +17,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
+import { resolveClientPresence, type PresenceSnapshot } from '../shared/presence';
 import { computeExpectedPositionSec, formatDuration } from '../shared/sync';
 import type {
   AuthUser,
@@ -79,6 +80,9 @@ interface RoomViewProps {
   onKickMember: (targetUserId: number) => void;
   onSendChat: (body: string, replyToId?: string) => void;
   onSendReaction: (emoji: string) => void;
+  onPresenceChange: (presence: PresenceSnapshot) => void;
+  notificationSoundEnabled: boolean;
+  onToggleNotificationSound: () => void;
   onNotify: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
 }
 
@@ -109,12 +113,21 @@ export function RoomView({
   onKickMember,
   onSendChat,
   onSendReaction,
+  onPresenceChange,
+  notificationSoundEnabled,
+  onToggleNotificationSound,
   onNotify,
 }: RoomViewProps) {
   const [sideTab, setSideTab] = useState<SideTab>('queue');
   const [mobileTab, setMobileTab] = useState<MobileTab>('player');
+  const [isDesktop, setIsDesktop] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)').matches : true
+  );
   const [showAddModal, setShowAddModal] = useState(false);
   const [copied, setCopied] = useState(false);
+  const lastSentPresenceRef = useRef<string | null>(null);
+  const onPresenceChangeRef = useRef(onPresenceChange);
+  onPresenceChangeRef.current = onPresenceChange;
 
   // Per-user local volume & autoplay unlock
   const [volume, setVolume] = useState<number>(() => {
@@ -144,6 +157,51 @@ export function RoomView({
       // ignore
     }
   }, [volume]);
+
+  // Track responsive breakpoint so we know accurately whether Chat is visible on screen
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const syncBreakpoint = () => setIsDesktop(mq.matches);
+    syncBreakpoint();
+    mq.addEventListener('change', syncBreakpoint);
+    return () => mq.removeEventListener('change', syncBreakpoint);
+  }, []);
+
+  const isChatOpen = isDesktop ? sideTab === 'chat' : mobileTab === 'chat';
+
+  // Report live foreground tab visibility + active chat presence to the room
+  useEffect(() => {
+    const publishPresence = () => {
+      const next = resolveClientPresence({
+        visibilityState: document.visibilityState,
+        isChatOpen,
+      });
+      const key = `${room.code}:${next.tabActive ? 1 : 0}:${next.inChat ? 1 : 0}`;
+      if (lastSentPresenceRef.current === key) return;
+      lastSentPresenceRef.current = key;
+      onPresenceChangeRef.current(next);
+    };
+
+    const handlePageHide = () => {
+      const key = `${room.code}:0:0`;
+      if (lastSentPresenceRef.current === key) return;
+      lastSentPresenceRef.current = key;
+      onPresenceChangeRef.current({ tabActive: false, inChat: false });
+    };
+
+    publishPresence();
+    document.addEventListener('visibilitychange', publishPresence);
+    window.addEventListener('focus', publishPresence);
+    window.addEventListener('pageshow', publishPresence);
+    window.addEventListener('pagehide', handlePageHide);
+
+    return () => {
+      document.removeEventListener('visibilitychange', publishPresence);
+      window.removeEventListener('focus', publishPresence);
+      window.removeEventListener('pageshow', publishPresence);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [room.code, isChatOpen]);
 
   // Update seek bar readout every 250ms purely in client UI (never writes to DB)
   useEffect(() => {
@@ -611,7 +669,10 @@ export function RoomView({
             {(mobileTab === 'chat' || (mobileTab === 'player' && sideTab === 'chat')) && (
               <ChatPanel
                 messages={room.chat}
+                listeners={room.listeners}
                 currentUsername={user.username}
+                soundEnabled={notificationSoundEnabled}
+                onToggleSound={onToggleNotificationSound}
                 onSendMessage={onSendChat}
                 onSendReaction={onSendReaction}
               />

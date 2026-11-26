@@ -31,6 +31,13 @@ type AuthedSocket = Socket<AnyEventMap, AnyEventMap, AnyEventMap, SocketData>;
 const joinSchema = z.object({
   code: z.string().trim().min(3).max(16),
   password: z.string().max(64).optional(),
+  tabActive: z.boolean().optional(),
+  inChat: z.boolean().optional(),
+});
+
+const presenceSchema = z.object({
+  tabActive: z.boolean(),
+  inChat: z.boolean(),
 });
 
 const seekSchema = z.object({
@@ -258,6 +265,8 @@ export function attachSocketServer(
           user: socket.data.user,
           socketId: socket.id,
           password: parsed.data.password,
+          tabActive: parsed.data.tabActive,
+          inChat: parsed.data.inChat,
         });
 
         if (prevCode && prevCode !== room.code) {
@@ -291,6 +300,21 @@ export function attachSocketServer(
       roomManager.registerSocket(socket.id, user.id);
       const prevRoom = await roomManager.getOrLoadRoom(prevCode);
       if (prevRoom) broadcastRoomListeners(prevRoom);
+    });
+
+    socket.on('presence:update', async (rawPayload: unknown) => {
+      try {
+        const parsed = presenceSchema.safeParse(rawPayload);
+        if (!parsed.success) return;
+
+        const { changed, roomCode } = roomManager.updateSocketPresence(socket.id, parsed.data);
+        if (changed && roomCode) {
+          const room = await roomManager.getOrLoadRoom(roomCode);
+          if (room) broadcastRoomListeners(room);
+        }
+      } catch {
+        // Non-fatal presence update
+      }
     });
 
     socket.on('playback:play', async (payload: unknown, ack?: (resp: unknown) => void) => {

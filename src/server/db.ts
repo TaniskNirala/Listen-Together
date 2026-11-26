@@ -128,10 +128,17 @@ class Database {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const res = await this.pgPool.query<T>(text, params);
+        const res: unknown =
+          params.length > 0
+            ? await this.pgPool.query<T>(text, params)
+            : await this.pgPool.query<T>(text);
+        const result = (Array.isArray(res) ? res[res.length - 1] : res) as
+          | { rows?: T[]; rowCount?: number | null }
+          | undefined;
+        const rows = result?.rows ?? [];
         return {
-          rows: res.rows,
-          rowCount: res.rowCount ?? res.rows.length,
+          rows,
+          rowCount: result?.rowCount ?? rows.length,
         };
       } catch (err) {
         lastError = err;

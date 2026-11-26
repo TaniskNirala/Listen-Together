@@ -4,8 +4,10 @@ import { z } from 'zod';
 import { requireAuth, type AuthedRequest } from '../auth';
 import { config } from '../config';
 import { logger } from '../logger';
-import { canAddTracks, canManageRoom } from '../permissions';
+import { canAddTracks, canControlPlayback, canManageRoom } from '../permissions';
 import { resolveBatchTrackLines, resolveMusicInput } from '../providers';
+import { sanitizeThumbnailUrl } from '../providers/youtubeSearchParsers';
+import type { ResolvedTrackMetadata } from '../providers/types';
 import { roomManager } from '../roomManager';
 import { broadcastRoomPlayback, broadcastRoomToast, emitImportProgressToUser } from '../socket';
 
@@ -22,10 +24,24 @@ const createRoomSchema = z.object({
   controlMode: z.enum(['everyone', 'dj_only']).default('everyone'),
 });
 
-const addTracksSchema = z.object({
-  input: z.string().trim().min(1, 'Paste a link or enter a song name.').max(2048),
-  importId: z.string().max(80).optional(),
+const resolvedYouTubeTrackSchema = z.object({
+  youtubeId: z.string().regex(/^[a-zA-Z0-9_-]{11}$/, 'Invalid YouTube video ID.'),
+  title: z.string().trim().min(1).max(200),
+  artist: z.string().trim().min(1).max(120).default('YouTube'),
+  durationSec: z.number().int().min(0).max(86_400).default(0),
+  thumbnailUrl: z.string().max(500).optional(),
 });
+
+const addTracksSchema = z
+  .object({
+    input: z.string().trim().min(1, 'Paste a link or enter a song name.').max(2048).optional(),
+    resolvedTrack: resolvedYouTubeTrackSchema.optional(),
+    playNow: z.boolean().optional(),
+    importId: z.string().max(80).optional(),
+  })
+  .refine((data) => Boolean(data.input || data.resolvedTrack), {
+    message: 'Paste a link or select a song.',
+  });
 
 const batchTracksSchema = z.object({
   lines: z.string().trim().min(2, 'Paste at least one song name.').max(20_000),
@@ -124,13 +140,13 @@ router.post('/:code/tracks', async (req: AuthedRequest, res) => {
       return;
     }
 
-    if (
-      !canAddTracks({
-        globalRole: req.user!.role,
-        roomRole: member.role,
-        controlMode: room.controlMode,
-      })
-    ) {
+    const permCtx = {
+      globalRole: req.user!.role,
+      roomRole: member.role,
+      controlMode: room.controlMode,
+    };
+
+    if (!canAddTracks(permCtx)) {
       res.status(403).json({ error: 'Only DJs and the host can add tracks in this room.' });
       return;
     }
@@ -141,55 +157,88 @@ router.post('/:code/tracks', async (req: AuthedRequest, res) => {
       return;
     }
 
-    const importId = parsed.data.importId || crypto.randomUUID();
-    const result = await resolveMusicInput(parsed.data.input, {
-      maxItems: config.maxPlaylistImport,
-      onProgress: (p) => {
-        emitImportProgressToUser(req.user!.id, {
-          importId,
-          roomCode: room.code,
-          ...p,
-        });
-      },
-    });
-
-    if (result.tracks.length === 0) {
-      emitImportProgressToUser(req.user!.id, {
-        importId,
-        roomCode: room.code,
-        stage: 'error',
-        processed: 0,
-        total: 0,
-        added: 0,
-        failed: result.failedCount || 0,
-        message: result.warning || 'No tracks found.',
-      });
-      res.status(422).json({
-        error: result.warning || 'Could not resolve any tracks from that link.',
-        fallbackPasteSupported: Boolean(result.fallbackPasteSupported),
-      });
+    const playNow = Boolean(parsed.data.playNow);
+    if (playNow && !canControlPlayback(permCtx)) {
+      res.status(403).json({ error: 'Only DJs and the host can switch playback.' });
       return;
     }
 
-    const added = await roomManager.enqueueTracks(room, result.tracks, req.user!);
+    const importId = parsed.data.importId || crypto.randomUUID();
+    let tracksToAdd: ResolvedTrackMetadata[] = [];
+    let playlistTitle: string | undefined;
+    let truncated = false;
+    let failedCount = 0;
+
+    if (parsed.data.resolvedTrack) {
+      const rt = parsed.data.resolvedTrack;
+      tracksToAdd = [
+        {
+          youtubeId: rt.youtubeId,
+          title: rt.title,
+          artist: rt.artist,
+          durationSec: rt.durationSec,
+          thumbnailUrl: sanitizeThumbnailUrl(rt.thumbnailUrl, rt.youtubeId),
+          source: 'youtube',
+          sourceUrl: `https://www.youtube.com/watch?v=${rt.youtubeId}`,
+        },
+      ];
+    } else {
+      const result = await resolveMusicInput(parsed.data.input!, {
+        maxItems: config.maxPlaylistImport,
+        onProgress: (p) => {
+          emitImportProgressToUser(req.user!.id, {
+            importId,
+            roomCode: room.code,
+            ...p,
+          });
+        },
+      });
+
+      if (result.tracks.length === 0) {
+        emitImportProgressToUser(req.user!.id, {
+          importId,
+          roomCode: room.code,
+          stage: 'error',
+          processed: 0,
+          total: 0,
+          added: 0,
+          failed: result.failedCount || 0,
+          message: result.warning || 'No tracks found.',
+        });
+        res.status(422).json({
+          error: result.warning || 'Could not resolve any tracks from that link.',
+          fallbackPasteSupported: Boolean(result.fallbackPasteSupported),
+        });
+        return;
+      }
+
+      tracksToAdd = result.tracks;
+      playlistTitle = result.playlistTitle;
+      truncated = Boolean(result.truncated);
+      failedCount = result.failedCount || 0;
+    }
+
+    const added = await roomManager.enqueueTracks(room, tracksToAdd, req.user!, { playNow });
     broadcastRoomPlayback(room);
 
     emitImportProgressToUser(req.user!.id, {
       importId,
       roomCode: room.code,
       stage: 'done',
-      processed: result.tracks.length,
-      total: result.tracks.length,
+      processed: tracksToAdd.length,
+      total: tracksToAdd.length,
       added: added.length,
-      failed: result.failedCount || 0,
-      message: `Added ${added.length} track${added.length === 1 ? '' : 's'} to queue.`,
+      failed: failedCount,
+      message: playNow
+        ? `Now playing "${added[0]?.title || 'track'}".`
+        : `Added ${added.length} track${added.length === 1 ? '' : 's'} to queue.`,
     });
 
     if (added.length > 1) {
       broadcastRoomToast(
         room.code,
         `${req.user!.username} imported ${added.length} tracks${
-          result.playlistTitle ? ` from "${result.playlistTitle}"` : ''
+          playlistTitle ? ` from "${playlistTitle}"` : ''
         }.`,
         'info'
       );
@@ -198,9 +247,10 @@ router.post('/:code/tracks', async (req: AuthedRequest, res) => {
     res.status(201).json({
       addedCount: added.length,
       tracks: added,
-      playlistTitle: result.playlistTitle,
-      truncated: Boolean(result.truncated),
-      failedCount: result.failedCount || 0,
+      playedNow: playNow,
+      playlistTitle,
+      truncated,
+      failedCount,
       maxPlaylistImport: config.maxPlaylistImport,
     });
   } catch (err) {

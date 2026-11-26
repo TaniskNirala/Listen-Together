@@ -620,7 +620,8 @@ class RoomManager {
   async enqueueTracks(
     room: RoomRuntime,
     metadataList: ResolvedTrackMetadata[],
-    addedBy: AuthUser
+    addedBy: AuthUser,
+    options?: { playNow?: boolean }
   ): Promise<Track[]> {
     const nowIso = new Date().toISOString();
     const created: Track[] = metadataList.map((m) => ({
@@ -640,24 +641,30 @@ class RoomManager {
 
     if (created.length === 0) return [];
 
-    // If nothing is currently playing, immediately start the first added track!
-    let autoStarted = false;
-    if (!room.playback.currentTrack) {
+    // Start immediately if nothing is playing OR caller explicitly requested playNow
+    let startedNow = false;
+    if (!room.playback.currentTrack || options?.playNow) {
+      const previous = room.playback.currentTrack;
+      if (previous && options?.playNow) {
+        await this.recordHistory(room, previous);
+      }
       const [first, ...rest] = created;
       room.playback.currentTrack = first;
       room.playback.isPlaying = true;
       room.playback.positionAtTimestamp = 0;
       room.playback.serverTimestamp = Date.now();
-      room.playback.queue.push(...rest);
-      autoStarted = true;
+      if (rest.length > 0) {
+        room.playback.queue.push(...rest);
+      }
+      startedNow = true;
     } else {
       room.playback.queue.push(...created);
     }
 
     await this.persistQueue(room);
     await this.persistPlaybackState(room);
-    if (autoStarted) {
-      logger.info('room_autostart_first_track', {
+    if (startedNow) {
+      logger.info(options?.playNow ? 'room_play_track_now' : 'room_autostart_first_track', {
         roomCode: room.code,
         trackId: room.playback.currentTrack?.id,
       });

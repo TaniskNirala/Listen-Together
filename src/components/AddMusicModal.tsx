@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { Link2, ListMusic, Loader2, Plus, Search, X } from 'lucide-react';
+import { Check, Link2, ListMusic, Loader2, Play, Plus, Search, X } from 'lucide-react';
 import { apiFetch, ApiError } from '../lib/api';
 import { formatDuration } from '../shared/sync';
 import type { PlaylistImportProgress } from '../shared/types';
@@ -20,7 +20,15 @@ interface AddMusicModalProps {
   onNotify: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
 }
 
-type ModalTab = 'link' | 'search' | 'batch';
+type ModalTab = 'search' | 'link' | 'batch';
+
+function looksLikeMusicUrl(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    /^https?:\/\//i.test(trimmed) ||
+    /(?:youtube\.com|youtu\.be|open\.spotify\.com)/i.test(trimmed)
+  );
+}
 
 export function AddMusicModal({
   roomCode,
@@ -28,7 +36,7 @@ export function AddMusicModal({
   onClose,
   onNotify,
 }: AddMusicModalProps) {
-  const [tab, setTab] = useState<ModalTab>('link');
+  const [tab, setTab] = useState<ModalTab>('search');
   const [linkInput, setLinkInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResultItem[]>([]);
@@ -36,14 +44,12 @@ export function AddMusicModal({
   const [batchLines, setBatchLines] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [addingVideoId, setAddingVideoId] = useState<string | null>(null);
+  const [activeActionKey, setActiveActionKey] = useState<string | null>(null);
+  const [queuedIds, setQueuedIds] = useState<Set<string>>(() => new Set());
 
-  const handleLinkSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!linkInput.trim()) return;
+  const submitLinkValue = async (rawInput: string) => {
     setError(null);
     setSubmitting(true);
-
     try {
       const data = await apiFetch<{
         addedCount: number;
@@ -54,7 +60,7 @@ export function AddMusicModal({
       }>(`/api/rooms/${encodeURIComponent(roomCode)}/tracks`, {
         method: 'POST',
         body: JSON.stringify({
-          input: linkInput.trim(),
+          input: rawInput.trim(),
           importId: crypto.randomUUID(),
         }),
       });
@@ -72,6 +78,7 @@ export function AddMusicModal({
 
       onNotify(msg, 'success');
       setLinkInput('');
+      setSearchQuery('');
       onClose();
     } catch (err) {
       if (err instanceof ApiError) {
@@ -87,39 +94,75 @@ export function AddMusicModal({
     }
   };
 
+  const handleLinkSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!linkInput.trim()) return;
+    await submitLinkValue(linkInput);
+  };
+
   const handleSearch = async (e: FormEvent) => {
     e.preventDefault();
-    if (!searchQuery.trim()) return;
+    const trimmed = searchQuery.trim();
+    if (!trimmed) return;
+
+    // If user pasted a direct YouTube/Spotify URL into Search, resolve it seamlessly
+    if (looksLikeMusicUrl(trimmed)) {
+      await submitLinkValue(trimmed);
+      return;
+    }
+
     setError(null);
     setSearching(true);
     try {
       const data = await apiFetch<{ results: SearchResultItem[] }>(
-        `/api/music/search?q=${encodeURIComponent(searchQuery.trim())}&limit=8`
+        `/api/music/search?q=${encodeURIComponent(trimmed)}&limit=8`
       );
       setSearchResults(data.results);
       if (data.results.length === 0) {
-        setError('No YouTube results found. Try a different search or paste a direct link.');
+        setError(
+          'No YouTube results found right now. Try another search, paste a direct YouTube link in Paste Link, or set a free YOUTUBE_API_KEY on your server.'
+        );
       }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Search failed.');
+      setError(err instanceof ApiError ? err.message : 'Search failed. Try pasting a direct link.');
     } finally {
       setSearching(false);
     }
   };
 
-  const handleAddSearchResult = async (item: SearchResultItem) => {
-    setAddingVideoId(item.youtubeId);
+  const handleSelectSearchResult = async (item: SearchResultItem, playNow: boolean) => {
+    const key = `${playNow ? 'play' : 'queue'}:${item.youtubeId}`;
+    setActiveActionKey(key);
     setError(null);
     try {
       await apiFetch(`/api/rooms/${encodeURIComponent(roomCode)}/tracks`, {
         method: 'POST',
-        body: JSON.stringify({ input: item.sourceUrl }),
+        body: JSON.stringify({
+          playNow,
+          resolvedTrack: {
+            youtubeId: item.youtubeId,
+            title: item.title,
+            artist: item.artist,
+            durationSec: item.durationSec,
+            thumbnailUrl: item.thumbnailUrl,
+          },
+        }),
       });
-      onNotify(`Queued "${item.title}".`, 'success');
+      if (playNow) {
+        onNotify(`Now playing "${item.title}".`, 'success');
+        onClose();
+      } else {
+        setQueuedIds((prev) => {
+          const next = new Set(prev);
+          next.add(item.youtubeId);
+          return next;
+        });
+        onNotify(`Queued "${item.title}".`, 'success');
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not add track.');
     } finally {
-      setAddingVideoId(null);
+      setActiveActionKey(null);
     }
   };
 
@@ -197,21 +240,6 @@ export function AddMusicModal({
             <button
               type="button"
               onClick={() => {
-                setTab('link');
-                setError(null);
-              }}
-              className={`inline-flex h-10 items-center justify-center gap-1.5 rounded-lg text-xs font-medium transition-colors ${
-                tab === 'link'
-                  ? 'bg-white text-slate-900 shadow-sm dark:bg-[#1E2636] dark:text-slate-100'
-                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
-              }`}
-            >
-              <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
-              Paste Link
-            </button>
-            <button
-              type="button"
-              onClick={() => {
                 setTab('search');
                 setError(null);
               }}
@@ -223,6 +251,21 @@ export function AddMusicModal({
             >
               <Search className="h-3.5 w-3.5" aria-hidden="true" />
               Search
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setTab('link');
+                setError(null);
+              }}
+              className={`inline-flex h-10 items-center justify-center gap-1.5 rounded-lg text-xs font-medium transition-colors ${
+                tab === 'link'
+                  ? 'bg-white text-slate-900 shadow-sm dark:bg-[#1E2636] dark:text-slate-100'
+                  : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+              }`}
+            >
+              <Link2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Paste Link
             </button>
             <button
               type="button"
@@ -272,6 +315,109 @@ export function AddMusicModal({
             </div>
           )}
 
+          {tab === 'search' && (
+            <div className="space-y-4">
+              <form onSubmit={handleSearch} className="flex gap-2">
+                <label htmlFor="yt-search-input" className="sr-only">
+                  Search YouTube
+                </label>
+                <input
+                  id="yt-search-input"
+                  type="text"
+                  autoFocus
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search songs, artists, or paste a YouTube link..."
+                  className="h-11 flex-1 rounded-xl border border-slate-300 bg-white px-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20 dark:border-[#2A3347] dark:bg-[#0B0E14] dark:text-slate-100"
+                />
+                <button
+                  type="submit"
+                  disabled={searching || submitting}
+                  className="inline-flex h-11 shrink-0 items-center justify-center rounded-xl bg-orange-600 px-4 text-sm font-semibold text-white hover:bg-orange-500 disabled:opacity-60"
+                >
+                  {searching || submitting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    'Search'
+                  )}
+                </button>
+              </form>
+
+              {searchResults.length > 0 && (
+                <ul className="divide-y divide-slate-200 dark:divide-[#1E2636]">
+                  {searchResults.map((item) => {
+                    const isPlayingAction = activeActionKey === `play:${item.youtubeId}`;
+                    const isQueueAction = activeActionKey === `queue:${item.youtubeId}`;
+                    const isBusy = activeActionKey !== null;
+                    const isQueued = queuedIds.has(item.youtubeId);
+
+                    return (
+                      <li key={item.youtubeId} className="flex items-center gap-3 py-2.5">
+                        <img
+                          src={item.thumbnailUrl}
+                          alt={item.title}
+                          referrerPolicy="no-referrer"
+                          className="h-11 w-16 shrink-0 rounded-lg bg-slate-200 object-cover dark:bg-[#1A202E]"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
+                            {item.title}
+                          </p>
+                          <p className="truncate text-xs text-slate-500 tabular-nums dark:text-slate-400">
+                            {item.artist}
+                            {item.durationSec > 0 ? ` · ${formatDuration(item.durationSec)}` : ''}
+                          </p>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleSelectSearchResult(item, true)}
+                            aria-label={`Play ${item.title} now`}
+                            className="inline-flex h-9 items-center gap-1 rounded-lg bg-orange-600 px-2.5 text-xs font-semibold text-white hover:bg-orange-500 disabled:opacity-50"
+                          >
+                            {isPlayingAction ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Play className="h-3.5 w-3.5 fill-current" aria-hidden="true" />
+                            )}
+                            Play
+                          </button>
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => void handleSelectSearchResult(item, false)}
+                            aria-label={`Queue ${item.title}`}
+                            className={`inline-flex h-9 items-center gap-1 rounded-lg border px-2.5 text-xs font-medium disabled:opacity-50 ${
+                              isQueued
+                                ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-800/70 dark:bg-emerald-950/40 dark:text-emerald-300'
+                                : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50 dark:border-[#242C3D] dark:bg-[#1A202E] dark:text-slate-100 dark:hover:bg-[#242C3D]'
+                            }`}
+                          >
+                            {isQueueAction ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : isQueued ? (
+                              <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                            ) : (
+                              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                            )}
+                            {isQueued ? 'Queued' : 'Queue'}
+                          </button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+
+              {!searching && searchResults.length === 0 && !error && (
+                <p className="py-4 text-center text-xs text-slate-500 dark:text-slate-400">
+                  Search YouTube directly and pick a song to play now or add to the room queue.
+                </p>
+              )}
+            </div>
+          )}
+
           {tab === 'link' && (
             <form onSubmit={handleLinkSubmit} className="space-y-4">
               <div>
@@ -313,69 +459,6 @@ export function AddMusicModal({
                 )}
               </button>
             </form>
-          )}
-
-          {tab === 'search' && (
-            <div className="space-y-4">
-              <form onSubmit={handleSearch} className="flex gap-2">
-                <label htmlFor="yt-search-input" className="sr-only">
-                  Search YouTube
-                </label>
-                <input
-                  id="yt-search-input"
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search artist or song title..."
-                  className="h-11 flex-1 rounded-xl border border-slate-300 bg-white px-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:border-orange-500 focus:outline-none focus:ring-2 focus:ring-orange-500/20 dark:border-[#2A3347] dark:bg-[#0B0E14] dark:text-slate-100"
-                />
-                <button
-                  type="submit"
-                  disabled={searching}
-                  className="inline-flex h-11 shrink-0 items-center justify-center rounded-xl bg-orange-600 px-4 text-sm font-semibold text-white hover:bg-orange-500 disabled:opacity-60"
-                >
-                  {searching ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Search'}
-                </button>
-              </form>
-
-              {searchResults.length > 0 && (
-                <ul className="divide-y divide-slate-200 dark:divide-[#1E2636]">
-                  {searchResults.map((item) => (
-                    <li key={item.youtubeId} className="flex items-center gap-3 py-2.5">
-                      <img
-                        src={item.thumbnailUrl}
-                        alt={item.title}
-                        referrerPolicy="no-referrer"
-                        className="h-11 w-16 shrink-0 rounded-lg bg-slate-200 object-cover dark:bg-[#1A202E]"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
-                          {item.title}
-                        </p>
-                        <p className="truncate text-xs text-slate-500 tabular-nums dark:text-slate-400">
-                          {item.artist}
-                          {item.durationSec > 0 ? ` · ${formatDuration(item.durationSec)}` : ''}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        disabled={addingVideoId === item.youtubeId}
-                        onClick={() => void handleAddSearchResult(item)}
-                        aria-label={`Add ${item.title} to queue`}
-                        className="inline-flex h-9 shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50 dark:border-[#242C3D] dark:bg-[#1A202E] dark:text-slate-100 dark:hover:bg-[#242C3D]"
-                      >
-                        {addingVideoId === item.youtubeId ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Plus className="h-3.5 w-3.5" aria-hidden="true" />
-                        )}
-                        Add
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
           )}
 
           {tab === 'batch' && (

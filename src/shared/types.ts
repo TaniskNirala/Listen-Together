@@ -18,6 +18,26 @@ export interface AdminUserRecord extends AuthUser {
   currentRoomName: string | null;
 }
 
+export type AutoplayMode = 'similar' | 'discovery' | 'familiar';
+
+export interface AutoplayDislike {
+  youtubeId: string;
+  title: string;
+  artist: string;
+  dislikedAt: string;
+}
+
+export interface AutoplayConfig {
+  enabled: boolean;
+  mode: AutoplayMode;
+  moodHint: string;
+  allowRepeats: boolean;
+  minDurationSec: number;
+  maxDurationSec: number;
+  blockedArtists: string[];
+  dislikedTracks: AutoplayDislike[];
+}
+
 export interface Track {
   id: string;
   youtubeId: string;
@@ -31,6 +51,8 @@ export interface Track {
   addedByUserId: number | null;
   addedByUsername: string;
   addedAt: string;
+  autoplay?: boolean;
+  autoplayReason?: string;
 }
 
 export interface HistoryItem {
@@ -85,6 +107,7 @@ export interface RoomFullState {
   controlMode: ControlMode;
   myRole: RoomRole;
   playback: RoomPlaybackState;
+  autoplay: AutoplayConfig;
   listeners: RoomListener[];
   chat: ChatMessage[];
   history: HistoryItem[];

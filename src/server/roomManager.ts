@@ -5,9 +5,15 @@ import { logger } from './logger';
 import { hashPassword, verifyPassword } from './auth';
 import { computeExpectedPositionSec, computeNextTrackTransition } from '../shared/sync';
 import { aggregateUserPresence } from '../shared/presence';
+import {
+  applyDislikeToAutoplayConfig,
+  cloneDefaultAutoplayConfig,
+  sanitizeAutoplayConfig,
+} from '../shared/autoplay';
 import { buildReplySnippet } from '../shared/validation';
 import type {
   AuthUser,
+  AutoplayConfig,
   ChatMessage,
   ChatReplyReference,
   ControlMode,
@@ -36,6 +42,7 @@ interface RoomRow {
   position_at_timestamp: number;
   server_timestamp: string | number;
   state_version: number;
+  autoplay_json?: AutoplayConfig | string | null;
   created_at: string;
 }
 
@@ -84,6 +91,9 @@ export interface RoomRuntime {
   hostUserId: number;
   controlMode: ControlMode;
   playback: RoomPlaybackState;
+  autoplay: AutoplayConfig;
+  autoplayRotationIndex: number;
+  autoplayInFlight: boolean;
   members: Map<number, { userId: number; username: string; role: RoomRole; kicked: boolean }>;
   onlineSockets: Map<number, Set<string>>;
   chat: ChatMessage[];
@@ -315,6 +325,9 @@ class RoomManager {
         shuffleEnabled: false,
         version: 1,
       },
+      autoplay: cloneDefaultAutoplayConfig(),
+      autoplayRotationIndex: 0,
+      autoplayInFlight: false,
       members: new Map([
         [
           params.host.id,
@@ -451,6 +464,9 @@ class RoomManager {
         shuffleEnabled: row.shuffle_enabled,
         version: row.state_version || 1,
       },
+      autoplay: sanitizeAutoplayConfig(parseJsonField<Partial<AutoplayConfig>>(row.autoplay_json ?? null)),
+      autoplayRotationIndex: 0,
+      autoplayInFlight: false,
       members,
       onlineSockets: new Map(),
       chat,
@@ -594,6 +610,11 @@ class RoomManager {
       controlMode: room.controlMode,
       myRole,
       playback: { ...room.playback, queue: [...room.playback.queue] },
+      autoplay: {
+        ...room.autoplay,
+        blockedArtists: [...room.autoplay.blockedArtists],
+        dislikedTracks: [...room.autoplay.dislikedTracks],
+      },
       listeners: this.getListeners(room),
       chat: [...room.chat],
       history: [...room.history],
@@ -780,7 +801,7 @@ class RoomManager {
 
   async advanceTrack(
     room: RoomRuntime,
-    options: { forcedSkip: boolean; expectedTrackId?: string }
+    options: { forcedSkip: boolean; expectedTrackId?: string; skipRecordHistory?: boolean }
   ): Promise<boolean> {
     // Idempotency: if a client reports track end or embed error for an old track, ignore it
     if (
@@ -799,7 +820,7 @@ class RoomManager {
       forcedSkip: options.forcedSkip,
     });
 
-    if (transition.shouldRecordHistory && previous) {
+    if (transition.shouldRecordHistory && previous && !options.skipRecordHistory) {
       await this.recordHistory(room, previous);
     }
 
@@ -812,6 +833,88 @@ class RoomManager {
     await this.persistQueue(room);
     await this.persistPlaybackState(room);
     return true;
+  }
+
+  async persistAutoplayConfig(room: RoomRuntime): Promise<void> {
+    await db.query(
+      `UPDATE rooms
+       SET autoplay_json = $2::jsonb,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [room.id, JSON.stringify(room.autoplay)]
+    );
+  }
+
+  async updateAutoplayConfig(
+    room: RoomRuntime,
+    patch: Partial<AutoplayConfig>
+  ): Promise<AutoplayConfig> {
+    room.autoplay = sanitizeAutoplayConfig(patch, room.autoplay);
+    await this.persistAutoplayConfig(room);
+    return room.autoplay;
+  }
+
+  async startAutoplayTrack(
+    room: RoomRuntime,
+    metadata: ResolvedTrackMetadata,
+    reason: string
+  ): Promise<Track> {
+    const track: Track = {
+      id: crypto.randomUUID(),
+      youtubeId: metadata.youtubeId,
+      title: metadata.title,
+      artist: metadata.artist,
+      durationSec: metadata.durationSec,
+      thumbnailUrl: metadata.thumbnailUrl,
+      source: metadata.source,
+      sourceUrl: metadata.sourceUrl,
+      matchedVia: metadata.matchedVia,
+      addedByUserId: null,
+      addedByUsername: 'Autoplay',
+      addedAt: new Date().toISOString(),
+      autoplay: true,
+      autoplayReason: reason,
+    };
+
+    room.playback.currentTrack = track;
+    room.playback.isPlaying = true;
+    room.playback.positionAtTimestamp = 0;
+    room.playback.serverTimestamp = Date.now();
+    await this.persistPlaybackState(room);
+    return track;
+  }
+
+  async dislikeCurrentTrack(
+    room: RoomRuntime,
+    options?: { expectedTrackId?: string; blockArtist?: boolean }
+  ): Promise<{
+    skippedTrack: Track | null;
+    autoBlockedArtist: boolean;
+  }> {
+    const current = room.playback.currentTrack;
+    if (!current) {
+      return { skippedTrack: null, autoBlockedArtist: false };
+    }
+    if (options?.expectedTrackId && current.id !== options.expectedTrackId) {
+      return { skippedTrack: null, autoBlockedArtist: false };
+    }
+
+    const { nextConfig, autoBlockedArtist } = applyDislikeToAutoplayConfig(
+      room.autoplay,
+      current,
+      { blockArtist: options?.blockArtist }
+    );
+    room.autoplay = nextConfig;
+    await this.persistAutoplayConfig(room);
+
+    // Skip immediately without recording the disliked song as positive history
+    await this.advanceTrack(room, {
+      forcedSkip: true,
+      expectedTrackId: current.id,
+      skipRecordHistory: true,
+    });
+
+    return { skippedTrack: current, autoBlockedArtist };
   }
 
   async playQueueItemNow(room: RoomRuntime, trackId: string): Promise<boolean> {

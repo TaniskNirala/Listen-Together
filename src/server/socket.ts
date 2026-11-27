@@ -12,6 +12,7 @@ import {
   canManageRoom,
 } from './permissions';
 import { roomManager, type RoomRuntime } from './roomManager';
+import { pickAutoplayTrackForRoom } from './autoplayService';
 import { normalizeReactionEmoji } from '../shared/validation';
 import type { AuthUser, PlaylistImportProgress, ReactionEvent } from '../shared/types';
 
@@ -94,6 +95,29 @@ const durationReportSchema = z.object({
   durationSec: z.number().positive().max(86_400),
 });
 
+const autoplayDislikeItemSchema = z.object({
+  youtubeId: z.string().min(1).max(32),
+  title: z.string().max(140),
+  artist: z.string().max(100),
+  dislikedAt: z.string().max(64),
+});
+
+const autoplayUpdateSchema = z.object({
+  enabled: z.boolean().optional(),
+  mode: z.enum(['similar', 'discovery', 'familiar']).optional(),
+  moodHint: z.string().max(80).optional(),
+  allowRepeats: z.boolean().optional(),
+  minDurationSec: z.number().int().min(0).max(300).optional(),
+  maxDurationSec: z.number().int().min(120).max(7200).optional(),
+  blockedArtists: z.array(z.string().max(80)).max(50).optional(),
+  dislikedTracks: z.array(autoplayDislikeItemSchema).max(100).optional(),
+});
+
+const autoplayDislikeActionSchema = z.object({
+  trackId: z.string().min(1).max(80).optional(),
+  blockArtist: z.boolean().optional(),
+});
+
 function getRoomChannel(code: string): string {
   return `room:${code}`;
 }
@@ -121,6 +145,70 @@ export function broadcastRoomToast(
 ): void {
   if (!ioInstance) return;
   ioInstance.to(getRoomChannel(roomCode)).emit('room:toast', { message, tone });
+}
+
+export function broadcastRoomAutoplay(room: RoomRuntime): void {
+  if (!ioInstance) return;
+  ioInstance.to(getRoomChannel(room.code)).emit('room:autoplay', {
+    autoplay: {
+      ...room.autoplay,
+      blockedArtists: [...room.autoplay.blockedArtists],
+      dislikedTracks: [...room.autoplay.dislikedTracks],
+    },
+  });
+}
+
+function broadcastAutoplayStatus(roomCode: string, loading: boolean): void {
+  if (!ioInstance) return;
+  ioInstance.to(getRoomChannel(roomCode)).emit('room:autoplay_status', { loading });
+}
+
+async function maybeFillWithAutoplay(
+  room: RoomRuntime,
+  options?: { excludedYoutubeIds?: string[]; avoidArtists?: string[] }
+): Promise<boolean> {
+  if (
+    !room.autoplay.enabled ||
+    room.playback.currentTrack ||
+    room.playback.queue.length > 0 ||
+    room.autoplayInFlight
+  ) {
+    return false;
+  }
+
+  room.autoplayInFlight = true;
+  broadcastAutoplayStatus(room.code, true);
+  try {
+    const picked = await pickAutoplayTrackForRoom(room, {
+      extraExcludedYoutubeIds: options?.excludedYoutubeIds,
+      avoidArtists: options?.avoidArtists,
+    });
+    // Human queue additions always take precedence if one arrived while searching
+    if (!room.autoplay.enabled || room.playback.currentTrack || room.playback.queue.length > 0) {
+      return false;
+    }
+    if (!picked) {
+      broadcastRoomToast(
+        room.code,
+        'Autoplay could not find a matching track right now. Try adjusting your mood hint or filters.',
+        'warning'
+      );
+      return false;
+    }
+
+    await roomManager.startAutoplayTrack(room, picked.metadata, picked.reason);
+    broadcastRoomPlayback(room);
+    return true;
+  } catch (err) {
+    logger.warn('autoplay_fill_error', {
+      roomCode: room.code,
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  } finally {
+    room.autoplayInFlight = false;
+    broadcastAutoplayStatus(room.code, false);
+  }
 }
 
 export function emitImportProgressToUser(userId: number, progress: PlaylistImportProgress): void {
@@ -430,6 +518,9 @@ export function attachSocketServer(
         await roomManager.advanceTrack(ctx.room, { forcedSkip: true });
         broadcastRoomPlayback(ctx.room);
         ack?.({ ok: true });
+        if (!ctx.room.playback.currentTrack && ctx.room.autoplay.enabled) {
+          void maybeFillWithAutoplay(ctx.room);
+        }
       } catch (err) {
         ack?.({ ok: false, error: err instanceof Error ? err.message : 'Skip failed.' });
       }
@@ -448,6 +539,9 @@ export function attachSocketServer(
         });
         if (advanced) {
           broadcastRoomPlayback(ctx.room);
+          if (!ctx.room.playback.currentTrack && ctx.room.autoplay.enabled) {
+            void maybeFillWithAutoplay(ctx.room);
+          }
         }
       } catch (err) {
         logger.warn('track_ended_error', {
@@ -463,7 +557,8 @@ export function attachSocketServer(
         const parsed = trackIdSchema.safeParse(rawPayload);
         if (!parsed.success) return;
 
-        const failedTitle = ctx.room.playback.currentTrack?.title || 'This video';
+        const failedTrack = ctx.room.playback.currentTrack;
+        const failedTitle = failedTrack?.title || 'This video';
         const advanced = await roomManager.advanceTrack(ctx.room, {
           forcedSkip: true,
           expectedTrackId: parsed.data.trackId,
@@ -475,6 +570,11 @@ export function attachSocketServer(
             `"${failedTitle}" does not allow embedding — skipped to next track.`,
             'warning'
           );
+          if (!ctx.room.playback.currentTrack && ctx.room.autoplay.enabled) {
+            void maybeFillWithAutoplay(ctx.room, {
+              excludedYoutubeIds: failedTrack ? [failedTrack.youtubeId] : [],
+            });
+          }
         }
       } catch (err) {
         logger.warn('embed_error_skip_failed', {
@@ -632,6 +732,106 @@ export function attachSocketServer(
         ack?.({ ok: true });
       } catch (err) {
         ack?.({ ok: false, error: err instanceof Error ? err.message : 'Shuffle toggle failed.' });
+      }
+    });
+
+    socket.on('autoplay:update', async (rawPayload: unknown, ack?: (resp: unknown) => void) => {
+      try {
+        const ctx = await getAuthorizedRoomContext(socket);
+        if (!ctx) return ack?.({ ok: false, error: 'Not in a room.' });
+        if (
+          !canControlPlayback({
+            globalRole: user.role,
+            roomRole: ctx.roomRole,
+            controlMode: ctx.room.controlMode,
+          })
+        ) {
+          return ack?.({ ok: false, error: 'Only DJs and the host can customize Autoplay.' });
+        }
+
+        const parsed = autoplayUpdateSchema.safeParse(rawPayload);
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: 'Invalid Autoplay settings.' });
+        }
+
+        const wasEnabled = ctx.room.autoplay.enabled;
+        const nextConfig = await roomManager.updateAutoplayConfig(ctx.room, parsed.data);
+        broadcastRoomAutoplay(ctx.room);
+        ack?.({ ok: true, autoplay: nextConfig });
+
+        // If Autoplay was just turned on while the room is idle, pick and start a track immediately
+        if (
+          nextConfig.enabled &&
+          (!wasEnabled || parsed.data.enabled === true) &&
+          !ctx.room.playback.currentTrack &&
+          ctx.room.playback.queue.length === 0
+        ) {
+          void maybeFillWithAutoplay(ctx.room);
+        }
+      } catch (err) {
+        ack?.({
+          ok: false,
+          error: err instanceof Error ? err.message : 'Failed to update Autoplay.',
+        });
+      }
+    });
+
+    socket.on('autoplay:dislike', async (rawPayload: unknown, ack?: (resp: unknown) => void) => {
+      try {
+        const ctx = await getAuthorizedRoomContext(socket);
+        if (!ctx) return ack?.({ ok: false, error: 'Not in a room.' });
+        if (
+          !canControlPlayback({
+            globalRole: user.role,
+            roomRole: ctx.roomRole,
+            controlMode: ctx.room.controlMode,
+          })
+        ) {
+          return ack?.({ ok: false, error: 'Only DJs and the host can steer Autoplay.' });
+        }
+
+        const parsed = autoplayDislikeActionSchema.safeParse(rawPayload ?? {});
+        if (!parsed.success) {
+          return ack?.({ ok: false, error: 'Invalid dislike request.' });
+        }
+
+        const { skippedTrack, autoBlockedArtist } = await roomManager.dislikeCurrentTrack(
+          ctx.room,
+          {
+            expectedTrackId: parsed.data.trackId,
+            blockArtist: parsed.data.blockArtist,
+          }
+        );
+
+        if (!skippedTrack) {
+          return ack?.({ ok: false, error: 'No matching track is currently playing.' });
+        }
+
+        broadcastRoomAutoplay(ctx.room);
+        broadcastRoomPlayback(ctx.room);
+
+        const cleanArtist = skippedTrack.artist.replace(/\s*-\s*topic\b/gi, '').trim();
+        broadcastRoomToast(
+          ctx.room.code,
+          autoBlockedArtist
+            ? `Skipped & blocked ${cleanArtist} from Autoplay.`
+            : `Marked not interested — Autoplay will steer away from ${cleanArtist}.`,
+          'info'
+        );
+
+        ack?.({ ok: true, autoBlockedArtist });
+
+        if (!ctx.room.playback.currentTrack && ctx.room.autoplay.enabled) {
+          void maybeFillWithAutoplay(ctx.room, {
+            excludedYoutubeIds: [skippedTrack.youtubeId],
+            avoidArtists: [skippedTrack.artist],
+          });
+        }
+      } catch (err) {
+        ack?.({
+          ok: false,
+          error: err instanceof Error ? err.message : 'Could not update Autoplay feedback.',
+        });
       }
     });
 

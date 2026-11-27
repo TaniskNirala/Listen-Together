@@ -4,6 +4,7 @@ import {
   Check,
   Copy,
   ListMusic,
+  Loader2,
   MessageSquare,
   Pause,
   Play,
@@ -13,6 +14,9 @@ import {
   Repeat1,
   Shuffle,
   SkipForward,
+  SlidersHorizontal,
+  Sparkles,
+  ThumbsDown,
   Users,
   Volume2,
   VolumeX,
@@ -21,6 +25,7 @@ import { resolveClientPresence, type PresenceSnapshot } from '../shared/presence
 import { computeExpectedPositionSec, formatDuration } from '../shared/sync';
 import type {
   AuthUser,
+  AutoplayConfig,
   ControlMode,
   PlaylistImportProgress,
   ReactionEvent,
@@ -28,6 +33,7 @@ import type {
   RoomFullState,
 } from '../shared/types';
 import { AddMusicModal } from './AddMusicModal';
+import { AutoplaySettingsModal } from './AutoplaySettingsModal';
 import { ChatPanel } from './ChatPanel';
 import { ListenersPanel } from './ListenersPanel';
 import { QueuePanel } from './QueuePanel';
@@ -81,6 +87,9 @@ interface RoomViewProps {
   onSendChat: (body: string, replyToId?: string) => void;
   onSendReaction: (emoji: string) => void;
   onPresenceChange: (presence: PresenceSnapshot) => void;
+  autoplayLoading: boolean;
+  onUpdateAutoplay: (patch: Partial<AutoplayConfig>) => void;
+  onDislikeTrack: (trackId: string, blockArtist?: boolean) => void;
   notificationSoundEnabled: boolean;
   onToggleNotificationSound: () => void;
   onNotify: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
@@ -114,6 +123,9 @@ export function RoomView({
   onSendChat,
   onSendReaction,
   onPresenceChange,
+  autoplayLoading,
+  onUpdateAutoplay,
+  onDislikeTrack,
   notificationSoundEnabled,
   onToggleNotificationSound,
   onNotify,
@@ -124,6 +136,7 @@ export function RoomView({
     typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)').matches : true
   );
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showAutoplayModal, setShowAutoplayModal] = useState(false);
   const [copied, setCopied] = useState(false);
   const lastSentPresenceRef = useRef<string | null>(null);
   const onPresenceChangeRef = useRef(onPresenceChange);
@@ -392,14 +405,36 @@ export function RoomView({
             <div className="mt-4 flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <h2 className="truncate font-display text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  {currentTrack ? currentTrack.title : 'Ready to play'}
+                  {currentTrack
+                    ? currentTrack.title
+                    : autoplayLoading
+                    ? 'Finding next track...'
+                    : 'Ready to play'}
                 </h2>
                 <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs text-slate-500 dark:text-slate-400">
-                  <span>{currentTrack ? currentTrack.artist : 'Add a link or search YouTube'}</span>
-                  {currentTrack && (
+                  <span>
+                    {currentTrack
+                      ? currentTrack.artist
+                      : autoplayLoading
+                      ? 'Autoplay is picking from your history'
+                      : 'Add a link or search YouTube'}
+                  </span>
+                  {currentTrack && !currentTrack.autoplay && (
                     <>
                       <span aria-hidden="true">·</span>
                       <span>Queued by {currentTrack.addedByUsername}</span>
+                    </>
+                  )}
+                  {currentTrack?.autoplay && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span
+                        data-testid="autoplay-track-badge"
+                        className="inline-flex items-center gap-1 font-medium text-orange-600 dark:text-orange-400"
+                      >
+                        <Sparkles className="h-3 w-3" aria-hidden="true" />
+                        {currentTrack.autoplayReason || 'Autoplay'}
+                      </span>
                     </>
                   )}
                   {currentTrack?.source === 'spotify' && (
@@ -412,6 +447,20 @@ export function RoomView({
                   )}
                 </div>
               </div>
+
+              {currentTrack?.autoplay && canControl && (
+                <button
+                  type="button"
+                  data-testid="autoplay-dislike-btn"
+                  disabled={autoplayLoading}
+                  onClick={() => onDislikeTrack(currentTrack.id)}
+                  title="Skip this autoplayed song and steer Autoplay away from similar tracks"
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 text-xs font-medium text-slate-700 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 disabled:opacity-50 dark:border-[#242C3D] dark:bg-[#1A202E] dark:text-slate-300 dark:hover:border-rose-500/40 dark:hover:bg-rose-500/10 dark:hover:text-rose-300"
+                >
+                  <ThumbsDown className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Not interested</span>
+                </button>
+              )}
             </div>
 
             {/* Seek Bar */}
@@ -531,6 +580,48 @@ export function RoomView({
                   ) : (
                     <Repeat className="h-4 w-4" />
                   )}
+                </button>
+
+                <span
+                  aria-hidden="true"
+                  className="mx-1 h-5 w-px bg-slate-200 dark:bg-[#242C3D]"
+                />
+
+                <button
+                  type="button"
+                  data-testid="autoplay-toggle"
+                  disabled={!canControl}
+                  onClick={() => onUpdateAutoplay({ enabled: !room.autoplay.enabled })}
+                  aria-pressed={room.autoplay.enabled}
+                  aria-label={room.autoplay.enabled ? 'Disable Autoplay' : 'Enable Autoplay'}
+                  title={
+                    room.autoplay.enabled
+                      ? `Autoplay on (${room.autoplay.mode}) — click to turn off`
+                      : 'Turn on Autoplay to play music automatically from room history'
+                  }
+                  className={`inline-flex h-10 items-center gap-1.5 rounded-xl px-2.5 text-xs font-semibold transition-colors disabled:opacity-40 ${
+                    room.autoplay.enabled
+                      ? 'bg-orange-500/15 text-orange-600 dark:text-orange-400'
+                      : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-[#1A202E] dark:hover:text-slate-100'
+                  }`}
+                >
+                  {autoplayLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                  )}
+                  <span className="hidden sm:inline">Autoplay</span>
+                </button>
+
+                <button
+                  type="button"
+                  data-testid="autoplay-settings-btn"
+                  onClick={() => setShowAutoplayModal(true)}
+                  aria-label="Customize Autoplay settings"
+                  title="Customize Autoplay"
+                  className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-[#1A202E] dark:hover:text-slate-100"
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
                 </button>
               </div>
 
@@ -659,8 +750,12 @@ export function RoomView({
               <QueuePanel
                 queue={room.playback.queue}
                 history={room.history}
+                autoplay={room.autoplay}
+                autoplayLoading={autoplayLoading}
                 canControl={canControl}
                 onOpenAddModal={() => setShowAddModal(true)}
+                onToggleAutoplay={() => onUpdateAutoplay({ enabled: !room.autoplay.enabled })}
+                onOpenAutoplaySettings={() => setShowAutoplayModal(true)}
                 onPlayNow={onPlayQueueItemNow}
                 onRemove={onRemoveQueueItem}
                 onReorder={onReorderQueue}
@@ -763,6 +858,17 @@ export function RoomView({
           importProgress={importProgress}
           onClose={() => setShowAddModal(false)}
           onNotify={onNotify}
+        />
+      )}
+
+      {/* Customize Autoplay Modal */}
+      {showAutoplayModal && (
+        <AutoplaySettingsModal
+          config={room.autoplay}
+          historyCount={room.history.length}
+          canControl={canControl}
+          onSave={onUpdateAutoplay}
+          onClose={() => setShowAutoplayModal(false)}
         />
       )}
     </main>

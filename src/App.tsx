@@ -24,6 +24,7 @@ import { ReconnectingOverlay } from './components/ReconnectingOverlay';
 import { ToastContainer, type ToastItem } from './components/ToastContainer';
 import type {
   AuthUser,
+  AutoplayConfig,
   ChatMessage,
   ControlMode,
   HistoryItem,
@@ -63,6 +64,7 @@ export default function App() {
   const [importProgress, setImportProgress] = useState<PlaylistImportProgress | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [showRenameModal, setShowRenameModal] = useState(false);
+  const [autoplayLoading, setAutoplayLoading] = useState(false);
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState<boolean>(() =>
     readNotificationSoundPreference()
   );
@@ -283,6 +285,14 @@ export default function App() {
       );
     };
 
+    const onAutoplayUpdate = (payload: { autoplay: AutoplayConfig }) => {
+      setActiveRoom((prev) => (prev ? { ...prev, autoplay: payload.autoplay } : prev));
+    };
+
+    const onAutoplayStatus = (payload: { loading: boolean }) => {
+      setAutoplayLoading(Boolean(payload?.loading));
+    };
+
     const onMyRole = (payload: { role: RoomRole }) => {
       setActiveRoom((prev) => (prev ? { ...prev, myRole: payload.role } : prev));
     };
@@ -413,6 +423,8 @@ export default function App() {
     s.on('connect_error', onConnectError);
     s.on('room:playback', onPlaybackUpdate);
     s.on('room:listeners', onListenersUpdate);
+    s.on('room:autoplay', onAutoplayUpdate);
+    s.on('room:autoplay_status', onAutoplayStatus);
     s.on('room:my_role', onMyRole);
     s.on('chat:message', onChatMessage);
     s.on('chat:user_renamed', onChatUserRenamed);
@@ -440,6 +452,8 @@ export default function App() {
       s.off('connect_error', onConnectError);
       s.off('room:playback', onPlaybackUpdate);
       s.off('room:listeners', onListenersUpdate);
+      s.off('room:autoplay', onAutoplayUpdate);
+      s.off('room:autoplay_status', onAutoplayStatus);
       s.off('room:my_role', onMyRole);
       s.off('chat:message', onChatMessage);
       s.off('chat:user_renamed', onChatUserRenamed);
@@ -494,6 +508,7 @@ export default function App() {
     const s = getSocket();
     if (s.connected) s.emit('room:leave');
     setActiveRoom(null);
+    setAutoplayLoading(false);
     setReactions([]);
     activeRoomPasswordRef.current = undefined;
     latestPresenceRef.current = {
@@ -622,6 +637,11 @@ export default function App() {
           }
           onSendReaction={(emoji) => emitWithAck('reaction:send', { emoji })}
           onPresenceChange={handlePresenceChange}
+          autoplayLoading={autoplayLoading}
+          onUpdateAutoplay={(patch) => emitWithAck('autoplay:update', patch as Record<string, unknown>)}
+          onDislikeTrack={(trackId, blockArtist) =>
+            emitWithAck('autoplay:dislike', { trackId, blockArtist })
+          }
           notificationSoundEnabled={notificationSoundEnabled}
           onToggleNotificationSound={handleToggleNotificationSound}
           onNotify={notify}
